@@ -3,114 +3,264 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Delta AI</title>
+  <title>Delta</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%23ffb547'/%3E%3Cstop offset='1' stop-color='%23f2613a'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='40' height='40' rx='12' fill='url(%23g)'/%3E%3Cpath d='M20 10 L30 28 H10 Z' fill='none' stroke='white' stroke-width='3' stroke-linejoin='round'/%3E%3C/svg%3E">
   <style>
+    /* Delta's palette: "dawn" — night ink with a sunrise accent. */
     :root {
-      --bg: #f7f7f8;
-      --panel: #ffffff;
-      --text: #1a1a1a;
-      --muted: #666;
-      --border: #ddd;
-      --accent: #2563eb;
-      --user: #2563eb;
+      --bg: #fbf7f2;
+      --bg-glow: rgba(242, 97, 58, 0.10);
+      --panel: rgba(255, 255, 255, 0.85);
+      --text: #1d1b26;
+      --muted: #6b6676;
+      --border: #e9e1d6;
+      --dawn-1: #ffb547;
+      --dawn-2: #f2613a;
+      --delta-bubble: #ffffff;
+      --user-bubble: #2b2840;
       --user-text: #ffffff;
-      --bot: #ececf0;
+      --online: #22c55e;
+      --offline: #ef4444;
+      --shadow: 0 1px 2px rgba(29, 27, 38, 0.06), 0 4px 16px rgba(29, 27, 38, 0.06);
     }
     @media (prefers-color-scheme: dark) {
       :root {
-        --bg: #111214;
-        --panel: #1b1c1f;
-        --text: #f0f0f0;
-        --muted: #aaa;
-        --border: #333;
-        --accent: #60a5fa;
-        --user: #2563eb;
+        --bg: #12111c;
+        --bg-glow: rgba(242, 97, 58, 0.16);
+        --panel: rgba(27, 25, 40, 0.85);
+        --text: #f3eff8;
+        --muted: #9c96ab;
+        --border: #2c2940;
+        --delta-bubble: #201e30;
+        --user-bubble: #f2613a;
         --user-text: #ffffff;
-        --bot: #2a2b2f;
+        --shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
       }
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
       height: 100vh;
+      height: 100dvh;
       display: flex;
       flex-direction: column;
-      background: var(--bg);
       color: var(--text);
       font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      background:
+        radial-gradient(ellipse 80% 50% at 50% 0%, var(--bg-glow), transparent 70%),
+        var(--bg);
     }
+
+    /* Header: avatar + name tag */
     header {
-      padding: 12px 16px;
       border-bottom: 1px solid var(--border);
       background: var(--panel);
+      backdrop-filter: blur(10px);
     }
-    header h1 { font-size: 1.2rem; margin: 0; }
-    #status { font-size: 0.85rem; color: var(--muted); margin-top: 4px; }
+    .header-inner {
+      max-width: 760px;
+      margin: 0 auto;
+      padding: 14px 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .back {
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 1.3rem;
+      padding: 4px;
+    }
+    .avatar {
+      flex-shrink: 0;
+      width: 44px;
+      height: 44px;
+      position: relative;
+    }
+    .avatar svg { width: 100%; height: 100%; display: block; }
+    .avatar .dot {
+      position: absolute;
+      right: -2px;
+      bottom: -2px;
+      width: 13px;
+      height: 13px;
+      border-radius: 50%;
+      background: var(--muted);
+      border: 2px solid var(--bg);
+      transition: background 0.3s;
+    }
+    .avatar .dot.online { background: var(--online); }
+    .avatar .dot.offline { background: var(--offline); }
+    .nametag { min-width: 0; }
+    .nametag h1 {
+      margin: 0;
+      font-size: 1.15rem;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .badge {
+      font-size: 0.68rem;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      padding: 2px 8px;
+      border-radius: 999px;
+      color: #fff;
+      background: linear-gradient(135deg, var(--dawn-1), var(--dawn-2));
+    }
+    .tagline { margin: 2px 0 0; font-size: 0.82rem; color: var(--muted); }
+
+    /* Chat */
     #chat {
       flex: 1;
       overflow-y: auto;
-      padding: 16px;
+      padding: 20px 16px;
       display: flex;
       flex-direction: column;
-      gap: 10px;
+      gap: 14px;
       max-width: 760px;
       width: 100%;
       margin: 0 auto;
     }
+    .row { display: flex; gap: 10px; align-items: flex-end; }
+    .row.user { justify-content: flex-end; }
+    .row .avatar { width: 30px; height: 30px; }
+    .stack { display: flex; flex-direction: column; gap: 4px; max-width: 80%; }
+    .row.user .stack { align-items: flex-end; }
+    .who { font-size: 0.75rem; font-weight: 600; color: var(--muted); padding: 0 4px; }
+    .row.delta .who { color: var(--dawn-2); }
     .msg {
-      max-width: 85%;
       padding: 10px 14px;
-      border-radius: 14px;
-      line-height: 1.45;
+      border-radius: 18px;
+      line-height: 1.5;
       white-space: pre-wrap;
       word-wrap: break-word;
+      box-shadow: var(--shadow);
     }
-    .user { align-self: flex-end; background: var(--user); color: var(--user-text); }
-    .bot { align-self: flex-start; background: var(--bot); }
+    .row.delta .msg {
+      background: var(--delta-bubble);
+      border: 1px solid var(--border);
+      border-bottom-left-radius: 6px;
+    }
+    .row.user .msg {
+      background: var(--user-bubble);
+      color: var(--user-text);
+      border-bottom-right-radius: 6px;
+    }
+    .notice {
+      align-self: center;
+      text-align: center;
+      font-size: 0.85rem;
+      color: var(--muted);
+      max-width: 420px;
+      line-height: 1.5;
+    }
+
+    /* Typing indicator */
+    .typing { display: inline-flex; gap: 4px; padding: 4px 0; }
+    .typing span {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--dawn-2);
+      opacity: 0.4;
+      animation: bounce 1.2s infinite;
+    }
+    .typing span:nth-child(2) { animation-delay: 0.15s; }
+    .typing span:nth-child(3) { animation-delay: 0.3s; }
+    @keyframes bounce {
+      0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+      30% { transform: translateY(-5px); opacity: 1; }
+    }
+
+    /* Input bar */
+    footer {
+      border-top: 1px solid var(--border);
+      background: var(--panel);
+      backdrop-filter: blur(10px);
+    }
     form {
       display: flex;
       gap: 8px;
-      padding: 12px 16px;
-      border-top: 1px solid var(--border);
-      background: var(--panel);
+      padding: 12px 16px 6px;
       max-width: 760px;
-      width: 100%;
       margin: 0 auto;
     }
     input {
       flex: 1;
-      padding: 10px 12px;
+      min-width: 0;
+      padding: 12px 16px;
       font-size: 1rem;
       border: 1px solid var(--border);
-      border-radius: 10px;
+      border-radius: 999px;
       background: var(--bg);
       color: var(--text);
+      outline: none;
     }
+    input:focus { border-color: var(--dawn-2); box-shadow: 0 0 0 3px var(--bg-glow); }
     button {
-      padding: 10px 16px;
+      padding: 12px 20px;
       font-size: 1rem;
+      font-weight: 600;
       border: none;
-      border-radius: 10px;
-      background: var(--accent);
+      border-radius: 999px;
       color: #fff;
+      background: linear-gradient(135deg, var(--dawn-1), var(--dawn-2));
       cursor: pointer;
+      white-space: nowrap;
     }
+    button:hover:not(:disabled) { filter: brightness(1.05); }
     button:disabled, input:disabled { opacity: 0.5; cursor: not-allowed; }
+    .fineprint {
+      max-width: 760px;
+      margin: 0 auto;
+      padding: 0 16px 10px;
+      font-size: 0.72rem;
+      color: var(--muted);
+      text-align: center;
+    }
+    .fineprint a { color: inherit; }
   </style>
 </head>
 <body>
+  <template id="avatar-tpl">
+    <svg viewBox="0 0 40 40" aria-hidden="true">
+      <defs>
+        <linearGradient id="dawn" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stop-color="#ffb547"/>
+          <stop offset="1" stop-color="#f2613a"/>
+        </linearGradient>
+      </defs>
+      <rect width="40" height="40" rx="12" fill="url(#dawn)"/>
+      <path d="M20 10 L30 28 H10 Z" fill="none" stroke="#fff" stroke-width="3" stroke-linejoin="round"/>
+    </svg>
+  </template>
+
   <header>
-    <h1>Delta AI</h1>
-    <div id="status">Connecting to Delta...</div>
+    <div class="header-inner">
+      <a class="back" href="./" aria-label="Back to home">←</a>
+      <div class="avatar" id="header-avatar"><span class="dot" id="dot"></span></div>
+      <div class="nametag">
+        <h1>Delta <span class="badge">AI</span></h1>
+        <p class="tagline" id="status">Waking up...</p>
+      </div>
+    </div>
   </header>
 
   <div id="chat"></div>
 
-  <form id="form">
-    <button type="button" id="load" disabled>Load AI</button>
-    <input id="input" placeholder="Say something..." autocomplete="off" disabled>
-    <button id="send" disabled>Send</button>
-  </form>
+  <footer>
+    <form id="form">
+      <button type="button" id="load" hidden>Load backup AI</button>
+      <input id="input" placeholder="Say something to Delta..." autocomplete="off" disabled>
+      <button id="send" disabled>Send</button>
+    </form>
+    <p class="fineprint">
+      Delta is an AI and can be wrong. Nothing you say is saved.
+      Built on Gemma — <a href="https://ai.google.dev/gemma/terms" target="_blank" rel="noopener">Gemma Terms of Use</a>.
+    </p>
+  </footer>
 
   <script type="module">
     // Two brains: the real Delta model (Ollama on the owner's PC, via the
@@ -120,32 +270,72 @@
     const BROWSER_SYSTEM = "You are Delta AI, a friendly and helpful assistant. Keep answers short.";
 
     const statusEl = document.getElementById("status");
+    const dotEl = document.getElementById("dot");
     const chatEl = document.getElementById("chat");
     const form = document.getElementById("form");
     const input = document.getElementById("input");
     const sendBtn = document.getElementById("send");
     const loadBtn = document.getElementById("load");
+    const avatarTpl = document.getElementById("avatar-tpl");
+
+    document.getElementById("header-avatar").prepend(avatarTpl.content.cloneNode(true));
 
     const history = []; // user/assistant turns only
     let deltaServer = null;
     let engine = null;
 
-    function addMessage(role, text) {
-      const div = document.createElement("div");
-      div.className = "msg " + (role === "user" ? "user" : "bot");
-      div.textContent = text;
-      chatEl.appendChild(div);
+    function scrollDown() {
       chatEl.scrollTop = chatEl.scrollHeight;
-      return div;
+    }
+
+    // Returns the bubble element so replies can stream into it.
+    // Pass text = null to show the typing indicator.
+    function addMessage(role, text) {
+      const row = document.createElement("div");
+      row.className = "row " + (role === "user" ? "user" : "delta");
+
+      const stack = document.createElement("div");
+      stack.className = "stack";
+      const who = document.createElement("div");
+      who.className = "who";
+      who.textContent = role === "user" ? "You" : (engine ? "Delta (backup)" : "Delta");
+      const bubble = document.createElement("div");
+      bubble.className = "msg";
+      if (text === null) {
+        bubble.innerHTML = '<span class="typing"><span></span><span></span><span></span></span>';
+      } else {
+        bubble.textContent = text;
+      }
+      stack.append(who, bubble);
+
+      if (role !== "user") {
+        const avatar = document.createElement("div");
+        avatar.className = "avatar";
+        avatar.append(avatarTpl.content.cloneNode(true));
+        row.append(avatar);
+      }
+      row.append(stack);
+      chatEl.append(row);
+      scrollDown();
+      return bubble;
+    }
+
+    function addNotice(text) {
+      const p = document.createElement("p");
+      p.className = "notice";
+      p.textContent = text;
+      chatEl.append(p);
+      scrollDown();
     }
 
     function ready(statusText, greeting) {
       statusEl.textContent = statusText;
-      loadBtn.style.display = "none";
+      dotEl.className = "dot online";
+      loadBtn.hidden = true;
       input.disabled = false;
       sendBtn.disabled = false;
       input.focus();
-      addMessage("bot", greeting);
+      addMessage("delta", greeting);
     }
 
     async function connectToDelta() {
@@ -154,17 +344,18 @@
         const res = await fetch(config.deltaServer + "/health", { signal: AbortSignal.timeout(5000) });
         if (!res.ok) throw new Error();
         deltaServer = config.deltaServer;
-        ready("Connected to Delta 🟢", "Hi! I'm Delta. What's on your mind?");
+        ready("Online · curious about everything", "Hey. I'm Delta — I've only been around since September, so everything's still new. What's your name?");
       } catch {
-        statusEl.textContent = "Delta is offline right now 🔴 — you can load a small backup AI instead (~300 MB download, runs on your device).";
-        loadBtn.textContent = "Load backup AI";
-        loadBtn.disabled = false;
+        statusEl.textContent = "Offline right now";
+        dotEl.className = "dot offline";
+        addNotice("Delta is asleep at the moment. You can load a small backup AI instead — it's a ~300 MB one-time download that runs on your own device.");
+        loadBtn.hidden = false;
       }
     }
 
     loadBtn.addEventListener("click", async () => {
       if (!navigator.gpu) {
-        statusEl.textContent = "Sorry, your browser doesn't support WebGPU. Try the latest Chrome or Edge on a computer.";
+        addNotice("Sorry, your browser doesn't support WebGPU. Try the latest Chrome or Edge on a computer.");
         return;
       }
       loadBtn.disabled = true;
@@ -173,9 +364,10 @@
         engine = await webllm.CreateMLCEngine(BROWSER_MODEL, {
           initProgressCallback: (p) => { statusEl.textContent = p.text; }
         });
-        ready("Backup AI ready (running on your device).", "Hi! I'm the backup Delta AI. Ask me anything.");
+        ready("Backup mode · running on your device", "Hi! I'm Delta's backup — smaller and simpler, but here. Ask me anything.");
       } catch (err) {
-        statusEl.textContent = "Failed to load: " + err.message;
+        statusEl.textContent = "Couldn't load backup AI";
+        addNotice("Failed to load: " + err.message);
         loadBtn.disabled = false;
       }
     });
@@ -224,18 +416,18 @@
 
       addMessage("user", text);
       history.push({ role: "user", content: text });
-      const botDiv = addMessage("bot", "...");
+      const bubble = addMessage("delta", null);
 
       try {
         let reply = "";
         for await (const piece of (deltaServer ? askDelta() : askBrowserModel())) {
           reply += piece;
-          botDiv.textContent = reply;
-          chatEl.scrollTop = chatEl.scrollHeight;
+          if (reply) bubble.textContent = reply;
+          scrollDown();
         }
         history.push({ role: "assistant", content: reply });
       } catch (err) {
-        botDiv.textContent = "Error: " + err.message;
+        bubble.textContent = "Hmm, something went wrong: " + err.message;
         history.pop();
       }
 
