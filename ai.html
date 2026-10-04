@@ -58,7 +58,7 @@
       backdrop-filter: blur(10px);
     }
     .header-inner {
-      max-width: 760px;
+      max-width: 1100px;
       margin: 0 auto;
       padding: 14px 16px;
       display: flex;
@@ -78,6 +78,10 @@
       position: relative;
     }
     .avatar svg { width: 100%; height: 100%; display: block; }
+    .avatar .face {
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--dawn-1), var(--dawn-2));
+    }
     .avatar .dot {
       position: absolute;
       right: -2px;
@@ -111,7 +115,110 @@
     }
     .tagline { margin: 2px 0 0; font-size: 0.82rem; color: var(--muted); }
 
-    /* Chat */
+    /* Layout: character stage + conversation */
+    .app {
+      flex: 1;
+      min-height: 0;
+      width: 100%;
+      max-width: 1100px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+    @media (min-width: 900px) {
+      .app { grid-template-columns: 340px 1fr; grid-template-rows: 1fr; }
+    }
+
+    /* Character stage */
+    .stage {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 8px 16px 4px;
+      border-bottom: 1px solid var(--border);
+    }
+    @media (min-width: 900px) {
+      .stage { border-bottom: none; border-right: 1px solid var(--border); padding: 24px; }
+    }
+    #character { width: 140px; height: auto; overflow: visible; }
+    @media (min-width: 900px) {
+      #character { width: 270px; }
+    }
+    .mood {
+      margin: 4px 0 0;
+      font-size: 0.8rem;
+      color: var(--muted);
+      min-height: 1.2em;
+      font-style: italic;
+    }
+
+    /* Character parts. Each moving part animates around its own centre. */
+    #character .part { transform-box: fill-box; transform-origin: center; }
+    #character .body { animation: breathe 3.6s ease-in-out infinite; }
+    #character .spark { animation: twinkle 2.8s ease-in-out infinite; }
+    #character .eye { transition: transform 0.09s ease-out; }
+    #character .pupil {
+      transform: translate(calc(var(--lx, 0) * 1px), calc(var(--ly, 0) * 1px));
+      transition: transform 0.15s ease-out;
+    }
+    #character .mouth-open { transform: scaleY(0); }
+    #character .zzz { opacity: 0; }
+
+    #character.blink .eye { transform: scaleY(0.08); }
+
+    #character[data-state="listening"] .eye { transform: scale(1.08); }
+    #character[data-state="listening"].blink .eye { transform: scaleY(0.08); }
+
+    #character[data-state="thinking"] .spark { animation: twinkle 0.9s ease-in-out infinite; }
+    #character[data-state="thinking"] .head-tilt { transform: rotate(-4deg); }
+
+    #character[data-state="talking"] .smile { opacity: 0; }
+    #character[data-state="talking"] .mouth-open { animation: talk 0.22s ease-in-out infinite alternate; }
+    #character[data-state="talking"] .head-tilt { animation: nod 0.9s ease-in-out infinite; }
+
+    #character[data-state="sleeping"] .eye { transform: scaleY(0.08); }
+    #character[data-state="sleeping"] .smile { opacity: 0.5; }
+    #character[data-state="sleeping"] .body { animation-duration: 5.5s; }
+    #character[data-state="sleeping"] .spark { opacity: 0.35; }
+    #character[data-state="sleeping"] .zzz { animation: zzz 3s ease-in-out infinite; }
+    #character[data-state="sleeping"] .zzz:nth-of-type(2) { animation-delay: 1s; }
+    #character[data-state="sleeping"] .zzz:nth-of-type(3) { animation-delay: 2s; }
+
+    /* Both hair layers and the face rotate around the neck together. */
+    #character .head-tilt { transform-box: view-box; transform-origin: 100px 150px; transition: transform 0.4s ease; }
+
+    @keyframes breathe {
+      0%, 100% { transform: translateY(0) scale(1, 1); }
+      50% { transform: translateY(-3px) scale(1.012, 0.99); }
+    }
+    @keyframes twinkle {
+      0%, 100% { transform: scale(1) rotate(0deg); opacity: 0.85; }
+      50% { transform: scale(1.25) rotate(20deg); opacity: 1; }
+    }
+    @keyframes talk {
+      from { transform: scaleY(0.15); }
+      to { transform: scaleY(1); }
+    }
+    @keyframes nod {
+      0%, 100% { transform: rotate(0deg); }
+      50% { transform: rotate(2deg); }
+    }
+    @keyframes zzz {
+      0% { opacity: 0; transform: translate(0, 0) scale(0.6); }
+      30% { opacity: 1; }
+      100% { opacity: 0; transform: translate(14px, -26px) scale(1.1); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      #character *, #character { animation: none !important; transition: none !important; }
+    }
+
+    /* Conversation */
+    .convo {
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+    }
     #chat {
       flex: 1;
       overflow-y: auto;
@@ -224,19 +331,6 @@
   </style>
 </head>
 <body>
-  <template id="avatar-tpl">
-    <svg viewBox="0 0 40 40" aria-hidden="true">
-      <defs>
-        <linearGradient id="dawn" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0" stop-color="#ffb547"/>
-          <stop offset="1" stop-color="#f2613a"/>
-        </linearGradient>
-      </defs>
-      <rect width="40" height="40" rx="12" fill="url(#dawn)"/>
-      <path d="M20 10 L30 28 H10 Z" fill="none" stroke="#fff" stroke-width="3" stroke-linejoin="round"/>
-    </svg>
-  </template>
-
   <header>
     <div class="header-inner">
       <a class="back" href="./" aria-label="Back to home">←</a>
@@ -248,19 +342,117 @@
     </div>
   </header>
 
-  <div id="chat"></div>
+  <main class="app">
+    <section class="stage" aria-label="Delta's character">
+      <!-- Delta: anime-style girl with sunrise hair. Parts with classes are animated by CSS. -->
+      <svg id="character" viewBox="0 0 200 230" data-state="sleeping" role="img" aria-label="Delta">
+        <defs>
+          <linearGradient id="hair-grad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#6b2a2e"/>
+            <stop offset="0.55" stop-color="#d4502f"/>
+            <stop offset="1" stop-color="#ffa348"/>
+          </linearGradient>
+          <linearGradient id="iris-grad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#7a2f1c"/>
+            <stop offset="1" stop-color="#f5a03c"/>
+          </linearGradient>
+          <linearGradient id="fade-grad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0.8" stop-color="#fff"/>
+            <stop offset="1" stop-color="#000"/>
+          </linearGradient>
+          <mask id="fade-bottom"><rect width="200" height="230" fill="url(#fade-grad)"/></mask>
+          <clipPath id="clip-eye-l"><ellipse cx="84" cy="112" rx="9" ry="10.5"/></clipPath>
+          <clipPath id="clip-eye-r"><ellipse cx="116" cy="112" rx="9" ry="10.5"/></clipPath>
+        </defs>
 
-  <footer>
-    <form id="form">
-      <button type="button" id="load" hidden>Load backup AI</button>
-      <input id="input" placeholder="Say something to Delta..." autocomplete="off" disabled>
-      <button id="send" disabled>Send</button>
-    </form>
-    <p class="fineprint">
-      Delta is an AI and can be wrong. Nothing you say is saved.
-      Built on Gemma — <a href="https://ai.google.dev/gemma/terms" target="_blank" rel="noopener">Gemma Terms of Use</a>.
-    </p>
-  </footer>
+        <text class="part zzz" x="140" y="62" font-size="16" font-weight="700" fill="#ffb547">z</text>
+        <text class="part zzz" x="150" y="50" font-size="13" font-weight="700" fill="#ffb547">z</text>
+        <text class="part zzz" x="158" y="40" font-size="10" font-weight="700" fill="#ffb547">z</text>
+
+        <g mask="url(#fade-bottom)">
+        <g class="part body">
+          <!-- Back hair (behind neck and shoulders) -->
+          <g class="head-tilt">
+            <path d="M100 40 C55 40 42 75 44 110 C46 150 42 180 34 208 L48 198 L56 214 L68 196 L132 196 L144 214 L152 198 L166 208 C158 180 154 150 156 110 C158 75 145 40 100 40 Z" fill="url(#hair-grad)"/>
+          </g>
+
+          <!-- Neck and shoulders -->
+          <rect x="90" y="140" width="20" height="46" rx="7" fill="#f3c6b0"/>
+          <path d="M36 230 C36 196 64 180 100 180 C136 180 164 196 164 230 Z" fill="#2b2840"/>
+          <path d="M86 181 L100 199 L114 181" fill="none" stroke="#f2613a" stroke-width="3" stroke-linejoin="round"/>
+
+          <!-- Face, features and front hair -->
+          <g class="head-tilt">
+            <path d="M64 100 C64 70 80 58 100 58 C120 58 136 70 136 100 C136 128 120 150 100 154 C80 150 64 128 64 100 Z" fill="#ffe6d8"/>
+
+            <ellipse cx="75" cy="128" rx="7" ry="3.5" fill="#ff7a8a" opacity="0.4"/>
+            <ellipse cx="125" cy="128" rx="7" ry="3.5" fill="#ff7a8a" opacity="0.4"/>
+
+            <path d="M76 98 Q84 95 92 97" fill="none" stroke="#7a3a2e" stroke-width="1.6" stroke-linecap="round"/>
+            <path d="M108 97 Q116 95 124 98" fill="none" stroke="#7a3a2e" stroke-width="1.6" stroke-linecap="round"/>
+
+            <g class="part eye">
+              <ellipse cx="84" cy="112" rx="9" ry="10.5" fill="#fff"/>
+              <g clip-path="url(#clip-eye-l)">
+                <g class="part pupil">
+                  <ellipse cx="84" cy="113" rx="6.5" ry="8" fill="url(#iris-grad)"/>
+                  <ellipse cx="84" cy="113" rx="3" ry="4" fill="#2a1210"/>
+                  <circle cx="86.5" cy="109.5" r="2.3" fill="#fff"/>
+                  <circle cx="82" cy="116.5" r="1" fill="#fff"/>
+                </g>
+              </g>
+              <path d="M74 106 Q84 98 95 104" fill="none" stroke="#2a1a1f" stroke-width="2.8" stroke-linecap="round"/>
+              <path d="M74 106 L71 104" stroke="#2a1a1f" stroke-width="2" stroke-linecap="round"/>
+            </g>
+            <g class="part eye">
+              <ellipse cx="116" cy="112" rx="9" ry="10.5" fill="#fff"/>
+              <g clip-path="url(#clip-eye-r)">
+                <g class="part pupil">
+                  <ellipse cx="116" cy="113" rx="6.5" ry="8" fill="url(#iris-grad)"/>
+                  <ellipse cx="116" cy="113" rx="3" ry="4" fill="#2a1210"/>
+                  <circle cx="118.5" cy="109.5" r="2.3" fill="#fff"/>
+                  <circle cx="114" cy="116.5" r="1" fill="#fff"/>
+                </g>
+              </g>
+              <path d="M105 104 Q116 98 126 106" fill="none" stroke="#2a1a1f" stroke-width="2.8" stroke-linecap="round"/>
+              <path d="M126 106 L129 104" stroke="#2a1a1f" stroke-width="2" stroke-linecap="round"/>
+            </g>
+
+            <path d="M100 121 l-1.5 4" fill="none" stroke="#e8a58f" stroke-width="1.4" stroke-linecap="round"/>
+
+            <path class="smile" d="M95 135 Q100 139 105 135" fill="none" stroke="#a33a3a" stroke-width="2.2" stroke-linecap="round"/>
+            <ellipse class="part mouth-open" cx="100" cy="136" rx="4" ry="3.5" fill="#7a2630"/>
+
+            <!-- Side locks and bangs -->
+            <path d="M64 90 C57 120 60 150 52 176 C64 162 71 140 71 110 Z" fill="url(#hair-grad)"/>
+            <path d="M136 90 C143 120 140 150 148 176 C136 162 129 140 129 110 Z" fill="url(#hair-grad)"/>
+            <path d="M58 100 C56 60 78 44 100 44 C124 44 146 60 142 102 C138 88 132 80 126 76 C124 86 118 92 110 94 C112 86 110 80 106 76 C100 86 90 92 78 94 C84 86 84 80 82 76 C74 82 66 92 58 100 Z" fill="url(#hair-grad)"/>
+            <path d="M78 56 Q100 46 122 56" fill="none" stroke="#fff" stroke-opacity="0.25" stroke-width="4" stroke-linecap="round"/>
+
+            <!-- Hair clip: a little spark of dawn -->
+            <path class="part spark" d="M132 70 L134.2 76.8 L141 79 L134.2 81.2 L132 88 L129.8 81.2 L123 79 L129.8 76.8 Z" fill="#ffd166" stroke="#fff6d6" stroke-width="0.8"/>
+          </g>
+        </g>
+        </g>
+      </svg>
+      <p class="mood" id="mood">zzz...</p>
+    </section>
+
+    <div class="convo">
+      <div id="chat"></div>
+      <footer>
+        <form id="form">
+          <button type="button" id="load" hidden>Load backup AI</button>
+          <input id="input" placeholder="Say something to Delta..." autocomplete="off" disabled>
+          <button id="send" disabled>Send</button>
+        </form>
+        <p class="fineprint">
+          Delta is an AI and can be wrong. Nothing you say is saved.
+          Built on Gemma — <a href="https://ai.google.dev/gemma/terms" target="_blank" rel="noopener">Gemma Terms of Use</a>.
+        </p>
+      </footer>
+    </div>
+  </main>
 
   <script type="module">
     // Two brains: the real Delta model (Ollama on the owner's PC, via the
@@ -276,10 +468,99 @@
     const input = document.getElementById("input");
     const sendBtn = document.getElementById("send");
     const loadBtn = document.getElementById("load");
-    const avatarTpl = document.getElementById("avatar-tpl");
+    // Small avatars are a static close-up of the character's face.
+    function makeAvatar() {
+      const face = document.getElementById("character").cloneNode(true);
+      face.removeAttribute("id");
+      face.removeAttribute("data-state");
+      face.removeAttribute("role");
+      face.setAttribute("aria-hidden", "true");
+      face.setAttribute("viewBox", "54 46 92 92");
+      face.classList.add("face");
+      face.querySelectorAll(".zzz, .mouth-open").forEach((el) => el.remove());
+      return face;
+    }
 
-    document.getElementById("header-avatar").prepend(avatarTpl.content.cloneNode(true));
+    document.getElementById("header-avatar").prepend(makeAvatar());
 
+    // ---- Character: moods, blinking, eyes that follow the pointer ----
+    const character = (() => {
+      const svg = document.getElementById("character");
+      const moodEl = document.getElementById("mood");
+      const moods = {
+        sleeping: "zzz...",
+        idle: "",
+        listening: "listening...",
+        thinking: "hmm...",
+        talking: "",
+      };
+      let state = "sleeping";
+      let pointer = null;
+      let listenTimer = null;
+      let talkTimer = null;
+
+      function set(next) {
+        state = next;
+        svg.dataset.state = next;
+        moodEl.textContent = moods[next];
+        updateEyes();
+      }
+
+      function look(x, y) {
+        svg.style.setProperty("--lx", x.toFixed(2));
+        svg.style.setProperty("--ly", y.toFixed(2));
+      }
+
+      function updateEyes() {
+        if (state === "sleeping") return look(0, 0);
+        if (state === "thinking") return look(2, -2.5);
+        if (!pointer) return look(0, 0);
+        const box = svg.getBoundingClientRect();
+        const cx = box.left + box.width / 2;
+        const cy = box.top + box.height * 0.6;
+        const dx = pointer.x - cx;
+        const dy = pointer.y - cy;
+        const dist = Math.hypot(dx, dy) || 1;
+        const reach = Math.min(1, dist / 300);
+        look((dx / dist) * 2.8 * reach, (dy / dist) * 2.2 * reach);
+      }
+
+      window.addEventListener("pointermove", (e) => {
+        pointer = { x: e.clientX, y: e.clientY };
+        updateEyes();
+      });
+      window.addEventListener("resize", updateEyes);
+
+      (function blinkLoop() {
+        setTimeout(() => {
+          if (state !== "sleeping") {
+            svg.classList.add("blink");
+            setTimeout(() => svg.classList.remove("blink"), 130);
+          }
+          blinkLoop();
+        }, 2200 + Math.random() * 3800);
+      })();
+
+      return {
+        set,
+        get state() { return state; },
+        // While the visitor types, Delta perks up.
+        listen() {
+          if (state !== "idle" && state !== "listening") return;
+          set("listening");
+          clearTimeout(listenTimer);
+          listenTimer = setTimeout(() => state === "listening" && set("idle"), 1500);
+        },
+        // Called for every streamed piece of a reply; the mouth stops shortly after the words do.
+        talk() {
+          if (state !== "talking") set("talking");
+          clearTimeout(talkTimer);
+          talkTimer = setTimeout(() => state === "talking" && set("idle"), 350);
+        },
+      };
+    })();
+
+    // ---- Chat ----
     const history = []; // user/assistant turns only
     let deltaServer = null;
     let engine = null;
@@ -311,7 +592,7 @@
       if (role !== "user") {
         const avatar = document.createElement("div");
         avatar.className = "avatar";
-        avatar.append(avatarTpl.content.cloneNode(true));
+        avatar.append(makeAvatar());
         row.append(avatar);
       }
       row.append(stack);
@@ -335,7 +616,9 @@
       input.disabled = false;
       sendBtn.disabled = false;
       input.focus();
+      character.set("idle");
       addMessage("delta", greeting);
+      character.talk();
     }
 
     async function connectToDelta() {
@@ -348,6 +631,7 @@
       } catch {
         statusEl.textContent = "Offline right now";
         dotEl.className = "dot offline";
+        character.set("sleeping");
         addNotice("Delta is asleep at the moment. You can load a small backup AI instead — it's a ~300 MB one-time download that runs on your own device.");
         loadBtn.hidden = false;
       }
@@ -406,6 +690,8 @@
       for await (const chunk of stream) yield chunk.choices[0]?.delta?.content || "";
     }
 
+    input.addEventListener("input", () => character.listen());
+
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       const text = input.value.trim();
@@ -417,12 +703,16 @@
       addMessage("user", text);
       history.push({ role: "user", content: text });
       const bubble = addMessage("delta", null);
+      character.set("thinking");
 
       try {
         let reply = "";
         for await (const piece of (deltaServer ? askDelta() : askBrowserModel())) {
           reply += piece;
-          if (reply) bubble.textContent = reply;
+          if (reply) {
+            bubble.textContent = reply;
+            character.talk();
+          }
           scrollDown();
         }
         history.push({ role: "assistant", content: reply });
@@ -430,6 +720,7 @@
         bubble.textContent = "Hmm, something went wrong: " + err.message;
         history.pop();
       }
+      if (character.state === "thinking") character.set("idle");
 
       input.disabled = false;
       sendBtn.disabled = false;
