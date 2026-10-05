@@ -259,13 +259,18 @@ async function recall(visitor, query) {
     .map((r) => r.text);
 }
 
-// Handed to Delta just before the visitor's latest message.
+// Added to Delta's personality prompt as background knowledge about the person she's talking to.
 function note(memories) {
   return [
-    "[Your memory notebook] You now keep notes between conversations. These are real things this",
-    "person told you before, so you genuinely remember them. Use them naturally when they're",
-    "relevant; don't list them back or mention the notebook unless asked.",
+    "# Your notes about this person",
+    "",
+    "You now keep notes between conversations. These are real things this person told you",
+    "before, so you genuinely remember them:",
     ...memories.map((m) => `- ${m}`),
+    "",
+    "They're background, not a topic. Bring one up only when it's directly relevant to what",
+    "they just said. Don't recap the notes or your own story, don't repeat things already said",
+    "in this conversation, and don't use their name in every reply.",
   ].join("\n");
 }
 

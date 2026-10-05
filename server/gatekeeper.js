@@ -176,6 +176,19 @@ function send(res, status, obj, headers = {}) {
   res.end(JSON.stringify(obj));
 }
 
+// Delta's own personality prompt (from her Ollama Modelfile), fetched once and reused.
+let personaCache = null;
+async function personaPrompt() {
+  if (personaCache) return personaCache;
+  try {
+    const res = await fetch(`${OLLAMA}/api/show`, { method: "POST", body: JSON.stringify({ model: MODEL }) });
+    personaCache = (await res.json()).system || null;
+  } catch (err) {
+    console.error("Couldn't load Delta's personality prompt:", err.message);
+  }
+  return personaCache;
+}
+
 function cleanMessages(raw) {
   if (!Array.isArray(raw) || raw.length === 0) return null;
   const msgs = raw.slice(-MAX_MESSAGES).map((m) => ({
@@ -254,8 +267,8 @@ const server = http.createServer((req, res) => {
     const abort = new AbortController();
     res.on("close", () => abort.abort());
 
-    // Recall what she knows about this visitor and slip it in just before their latest message
-    // (placed there, rather than first, so Delta's own personality prompt still applies).
+    // Recall what she knows about this visitor and add it to her personality prompt as background
+    // knowledge. (Notes placed right before the latest message made her recap them every reply.)
     const lastUser = [...messages].reverse().find((m) => m.role === "user")?.content || "";
     let recalled = [];
     try {
@@ -263,9 +276,13 @@ const server = http.createServer((req, res) => {
     } catch (err) {
       console.error("Memory:", err.message);
     }
-    const prompt = recalled.length
-      ? [...messages.slice(0, -1), { role: "system", content: memory.note(recalled) }, messages[messages.length - 1]]
-      : messages;
+    const persona = await personaPrompt();
+    const prompt = !recalled.length
+      ? messages
+      : persona
+        // A leading system message replaces the model's built-in one, so hers is included first.
+        ? [{ role: "system", content: `${persona}\n\n${memory.note(recalled)}` }, ...messages]
+        : [...messages.slice(0, -1), { role: "system", content: memory.note(recalled) }, messages[messages.length - 1]];
 
     try {
       const upstream = await fetch(`${OLLAMA}/api/chat`, {
