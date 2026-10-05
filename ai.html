@@ -396,7 +396,8 @@
         thinking: "hmm...",
         talking: "",
       };
-      const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+      // "Reduce motion" tones her movement down rather than freezing her.
+      const motion = matchMedia("(prefers-reduced-motion: reduce)").matches ? 0.4 : 1;
       let state = "sleeping";
       let loaded = false;
       let pointer = null;
@@ -405,6 +406,8 @@
       let talkTimer = null;
       let blinkUntil = 0;
       let nextBlink = 0;
+      let glance = { x: 0, y: 0 };
+      let nextGlance = 0;
 
       const clamp = (v, lo = -1, hi = 1) => Math.max(lo, Math.min(hi, v));
 
@@ -441,19 +444,26 @@
           out.tilt = 0.6;
         } else if (pointer && t - pointerTime < 4000) {
           [out.lx, out.ly] = lookAt(pointer.x, pointer.y);
-        } else if (!reduceMotion) {
-          // Idle: glance around on her own.
-          out.lx = Math.sin(t / 2300) * 0.45 + Math.sin(t / 900) * 0.1;
-          out.ly = Math.sin(t / 3100) * 0.25;
+        } else {
+          // Idle: dart her gaze to a new spot every few seconds, like a person would.
+          if (t > nextGlance) {
+            glance = Math.random() < 0.3
+              ? { x: 0, y: 0 } // back to the viewer
+              : { x: (Math.random() * 2 - 1) * 0.7 * motion, y: (Math.random() * 2 - 1) * 0.35 * motion };
+            nextGlance = t + 1500 + Math.random() * 2500;
+          }
+          out.lx = glance.x;
+          out.ly = glance.y;
         }
 
         if (state === "listening") out.happy = 0.25;
         if (state === "talking") {
-          const open = reduceMotion ? 0.5 : Math.abs(Math.sin(t / 55) * Math.sin(t / 137));
+          const open = Math.abs(Math.sin(t / 55) * Math.sin(t / 137));
           out.aa = 0.15 + 0.6 * open;
           out.oh = 0.3 * Math.abs(Math.sin(t / 90));
-          out.ly += Math.sin(t / 160) * 0.06;
-          out.happy = 0.1;
+          out.ly += Math.sin(t / 160) * 0.12 * motion;
+          out.tilt += Math.sin(t / 700) * 0.6 * motion;
+          out.happy = 0.15;
         }
 
         if (t > nextBlink) {
@@ -541,11 +551,14 @@
 
         // Smoothed values chase their targets every frame.
         const cur = { lx: 0, ly: 0, tilt: 0, blink: 1, aa: 0, oh: 0, happy: 0, relaxed: 0.3, sleep: 1 };
-        const ease = { lx: 0.07, ly: 0.07, tilt: 0.05, blink: 0.55, aa: 0.45, oh: 0.3, happy: 0.08, relaxed: 0.05, sleep: 0.04 };
+        const ease = { lx: 0.09, ly: 0.09, tilt: 0.05, blink: 0.55, aa: 0.45, oh: 0.3, happy: 0.08, relaxed: 0.05, sleep: 0.04 };
         const head = bone("head");
         const neck = bone("neck");
         const spine = bone("spine");
         const chest = bone("chest");
+        const hips = bone("hips");
+        const shoulders = [bone("leftShoulder"), bone("rightShoulder")];
+        const upperArms = [bone("leftUpperArm"), bone("rightUpperArm")];
         let lastT = null;
 
         function frame(t) {
@@ -554,12 +567,27 @@
           const goal = targets(t);
           for (const key in cur) cur[key] += (goal[key] - cur[key]) * (1 - Math.pow(1 - ease[key], dt * 60));
 
-          const breath = reduceMotion ? 0 : Math.sin(t / (state === "sleeping" ? 875 : 573));
+          const breath = Math.sin(t / (state === "sleeping" ? 875 : 573)) * motion;
+          const sway = Math.sin(t / 1900) * motion;
+          const idleTilt = Math.sin(t / 2600) * motion;
+
           // The head turns part of the way toward what she's looking at; her eyes do the rest.
-          head.rotation.set(cur.ly * 0.25 + cur.sleep * 0.3, cur.lx * 0.35, cur.tilt * 0.1 + cur.sleep * 0.12);
-          if (neck) neck.rotation.set(cur.ly * 0.1, cur.lx * 0.15, 0);
-          spine.rotation.set(breath * 0.012, cur.lx * 0.05, 0);
-          if (chest) chest.rotation.x = breath * 0.015;
+          head.rotation.set(
+            cur.ly * 0.3 + cur.sleep * 0.3,
+            cur.lx * 0.5,
+            cur.tilt * 0.12 + idleTilt * 0.05 + cur.sleep * 0.12,
+          );
+          if (neck) neck.rotation.set(cur.ly * 0.12, cur.lx * 0.2, 0);
+
+          // Weight shifts from hip to hip, the upper body counter-balances,
+          // and her chest and shoulders rise with each breath.
+          if (hips) hips.rotation.z = sway * 0.035;
+          spine.rotation.set(breath * 0.02 + cur.sleep * 0.08, cur.lx * 0.1, -sway * 0.025);
+          if (chest) chest.rotation.x = breath * 0.025;
+          shoulders[0] && (shoulders[0].rotation.z = breath * 0.03);
+          shoulders[1] && (shoulders[1].rotation.z = -breath * 0.03);
+          upperArms[0].rotation.z = -1.25 + breath * 0.02;
+          upperArms[1].rotation.z = 1.25 - breath * 0.02;
 
           lookTarget.position.set(
             camera.position.x + cur.lx * 0.6,
