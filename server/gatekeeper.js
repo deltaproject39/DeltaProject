@@ -98,6 +98,11 @@ function handleMemory(req, res, cors, body) {
     }
     case "list":
       return send(res, 200, { memories: memory.list(msg.visitor) }, cors);
+    case "history":
+      return send(res, 200, { messages: memory.history(msg.visitor) }, cors);
+    case "clearChat":
+      memory.clearHistory(msg.visitor);
+      return send(res, 200, { ok: true }, cors);
     case "forget":
       memory.forget(msg.visitor, msg.id);
       return send(res, 200, { ok: true }, cors);
@@ -276,11 +281,23 @@ const server = http.createServer((req, res) => {
       });
       if (!upstream.ok) throw new Error(`Ollama returned ${upstream.status}`);
 
-      // Pass Ollama's stream (one JSON object per line) straight through, then let her take
-      // notes on what the visitor said.
+      // Pass Ollama's stream (one JSON object per line) straight through, keeping a copy of her
+      // reply so the exchange can be saved, then let her take notes on what the visitor said.
       res.writeHead(200, { ...cors, "Content-Type": "application/x-ndjson" });
-      for await (const chunk of upstream.body) res.write(chunk);
+      const decoder = new TextDecoder();
+      let pending = "";
+      let reply = "";
+      for await (const chunk of upstream.body) {
+        res.write(chunk);
+        pending += decoder.decode(chunk, { stream: true });
+        const lines = pending.split("\n");
+        pending = lines.pop();
+        for (const line of lines) {
+          try { reply += JSON.parse(line).message?.content || ""; } catch {}
+        }
+      }
       res.end();
+      memory.saveExchange(visitor, lastUser, reply);
       memory.learn(visitor, lastUser);
     } catch (err) {
       if (!res.headersSent) send(res, 502, { error: "Delta is offline right now." }, cors);

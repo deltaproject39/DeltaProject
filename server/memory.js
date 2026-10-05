@@ -64,7 +64,18 @@ const existing = new Set(db.prepare("PRAGMA table_info(visitors)").all().map((c)
 for (const [name, type] of Object.entries(COLUMNS)) {
   if (!existing.has(name)) db.exec(`ALTER TABLE visitors ADD COLUMN ${name} ${type}`);
 }
-db.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)");
+db.exec(`
+  CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+  CREATE TABLE IF NOT EXISTS messages (
+    id      INTEGER PRIMARY KEY,
+    visitor TEXT NOT NULL REFERENCES visitors(id) ON DELETE CASCADE,
+    role    TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS messages_by_visitor ON messages(visitor, id);
+`);
+const MAX_SAVED_MESSAGES = 200; // per visitor; older ones are dropped
 
 const MAX_PIN_FAILS = 5;
 const LOCK_MINUTES = 15;
@@ -92,6 +103,11 @@ function countMemories(visitor) {
   return db.prepare("SELECT COUNT(*) AS n FROM memories WHERE visitor = ?").get(visitor).n;
 }
 
+const isKnown = (visitor) => isVisitorId(visitor) && Boolean(db.prepare("SELECT 1 FROM visitors WHERE id = ?").get(visitor));
+// Has this visitor anything worth keeping: notes or a saved conversation?
+const hasData = (visitor) =>
+  countMemories(visitor) > 0 || Boolean(db.prepare("SELECT 1 FROM messages WHERE visitor = ? LIMIT 1").get(visitor));
+
 // ---- Visitors ----
 
 // Registers a visitor the first time they're seen; returns their code and memory count.
@@ -110,7 +126,7 @@ function hello(visitor) {
 
 // A memory code typed on another device gives back that visitor's ID. The device's own ID is
 // usually brand new and empty, so it's dropped rather than left behind; one that already has
-// memories is kept.
+// notes or a conversation is kept.
 // Codes protected by a PIN also need the PIN; too many wrong PINs lock the code for a while.
 // Returns { visitor, code, count } or { error: "notfound" | "needpin" | "badpin" | "locked", minutes? }.
 function claim(code, pin, previousVisitor) {
@@ -134,17 +150,18 @@ function claim(code, pin, previousVisitor) {
     db.prepare("UPDATE visitors SET fails = 0 WHERE id = ?").run(row.id);
   }
 
-  if (isVisitorId(previousVisitor) && previousVisitor !== row.id && countMemories(previousVisitor) === 0) {
+  if (isVisitorId(previousVisitor) && previousVisitor !== row.id && !hasData(previousVisitor)) {
     db.prepare("DELETE FROM visitors WHERE id = ? AND keep = 0").run(previousVisitor);
   }
   return { visitor: row.id, code: wanted, count: countMemories(row.id) };
 }
 
-// Once a week, visitors who never told her anything and haven't been back in a week are removed.
+// Once a week, visitors with no notes and no conversation who haven't been back in a week are removed.
 const WEEK = 7 * 24 * 60 * 60 * 1000;
 function tidy() {
   const removed = db.prepare(`DELETE FROM visitors WHERE keep = 0 AND seen < ?
-    AND NOT EXISTS (SELECT 1 FROM memories WHERE memories.visitor = visitors.id)`).run(Date.now() - WEEK).changes;
+    AND NOT EXISTS (SELECT 1 FROM memories WHERE memories.visitor = visitors.id)
+    AND NOT EXISTS (SELECT 1 FROM messages WHERE messages.visitor = visitors.id)`).run(Date.now() - WEEK).changes;
   if (removed) console.log(`Memory: tidied away ${removed} empty visitor${removed === 1 ? "" : "s"}.`);
 }
 function tidyIfDue() {
@@ -168,7 +185,32 @@ function forget(visitor, memoryId) {
 
 function forgetEverything(visitor) {
   if (!isVisitorId(visitor)) return;
-  db.prepare("DELETE FROM visitors WHERE id = ?").run(visitor); // memories go with it
+  db.prepare("DELETE FROM visitors WHERE id = ?").run(visitor); // notes and conversation go with it
+}
+
+// ---- Conversation ----
+
+// Saves one exchange so the conversation survives a reload or a move to another device.
+function saveExchange(visitor, userText, replyText) {
+  if (!isKnown(visitor) || !userText || !replyText) return;
+  const now = Date.now();
+  const insert = db.prepare("INSERT INTO messages (visitor, role, content, created) VALUES (?, ?, ?, ?)");
+  insert.run(visitor, "user", userText, now);
+  insert.run(visitor, "assistant", replyText, now + 1);
+  db.prepare(`DELETE FROM messages WHERE visitor = ? AND id NOT IN
+    (SELECT id FROM messages WHERE visitor = ? ORDER BY id DESC LIMIT ?)`).run(visitor, visitor, MAX_SAVED_MESSAGES);
+}
+
+// The most recent messages, oldest first.
+function history(visitor, limit = 60) {
+  if (!isVisitorId(visitor)) return [];
+  return db.prepare("SELECT role, content, created FROM messages WHERE visitor = ? ORDER BY id DESC LIMIT ?")
+    .all(visitor, limit).reverse();
+}
+
+function clearHistory(visitor) {
+  if (!isVisitorId(visitor)) return;
+  db.prepare("DELETE FROM messages WHERE visitor = ?").run(visitor);
 }
 
 // ---- Embeddings ----
@@ -291,4 +333,6 @@ function learn(visitor, userText) {
     .catch((err) => console.error("Memory:", err.message));
 }
 
-module.exports = { hello, claim, list, forget, forgetEverything, recall, note, learn };
+module.exports = {
+  hello, claim, list, forget, forgetEverything, recall, note, learn, saveExchange, history, clearHistory,
+};

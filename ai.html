@@ -276,7 +276,8 @@
       background: transparent;
       border: 1px solid var(--border);
     }
-    .sheet-actions { display: flex; justify-content: space-between; gap: 8px; margin-top: 18px; }
+    .sheet-actions { display: flex; gap: 8px; margin-top: 18px; }
+    .sheet-actions #memory-clear-chat { margin-left: auto; }
     .danger { background: var(--offline); }
     #memory-status { min-height: 1.2em; margin: 10px 0 0; font-size: 0.85rem; color: var(--muted); }
 
@@ -450,7 +451,7 @@
           <button id="send" disabled>Send</button>
         </form>
         <p class="fineprint">
-          Delta is an AI and can be wrong. She remembers things you tell her about yourself (🧠 to see or erase them).
+          Delta is an AI and can be wrong. She remembers your conversation and things you tell her (🧠 to see or erase them).
           Built on Gemma — <a href="https://ai.google.dev/gemma/terms" target="_blank" rel="noopener">Gemma Terms of Use</a>.
         </p>
       </footer>
@@ -459,8 +460,8 @@
 
   <dialog class="sheet" id="memory-dialog" aria-labelledby="memory-title">
     <h2 id="memory-title">🧠 What Delta remembers</h2>
-    <p class="sub">She jots down things you tell her about yourself, so she can remember you next time.
-      They're tied to this browser and stored only on Delta's home PC.</p>
+    <p class="sub">She keeps your conversation and jots down things you tell her about yourself, so she
+      can pick up where you left off. It's tied to this browser and stored only on Delta's home PC.</p>
 
     <h3>Your memory code</h3>
     <div class="code-row">
@@ -482,6 +483,7 @@
     <p id="memory-status" role="status"></p>
     <div class="sheet-actions">
       <button type="button" class="danger" id="memory-forget-all">Forget me</button>
+      <button type="button" class="plain" id="memory-clear-chat">Clear chat</button>
       <button type="button" class="plain" id="memory-close">Close</button>
     </div>
   </dialog>
@@ -1065,6 +1067,21 @@
       character.talk();
     }
 
+    // Puts a saved conversation back on screen and into her context.
+    function restoreConversation(messages) {
+      if (messages.length === 0) return;
+      for (const m of messages) {
+        addMessage(m.role === "user" ? "user" : "delta", m.content);
+        history.push({ role: m.role === "user" ? "user" : "assistant", content: m.content });
+      }
+      addNotice("— earlier conversation —");
+    }
+
+    function clearConversation() {
+      chatEl.textContent = "";
+      history.length = 0;
+    }
+
     async function connectToDelta() {
       try {
         const config = await (await fetch("config.json", { cache: "no-store" })).json();
@@ -1072,9 +1089,13 @@
         if (!res.ok) throw new Error();
         deltaServer = config.deltaServer;
         const known = await memoryBook.hello();
-        ready("Online · curious about everything", known?.count
-          ? "Oh, hey, it's you again. What's new?"
-          : "Hey. I'm Delta — I've only been around since September, so everything's still new. What's your name?");
+        const past = known ? await memoryBook.loadConversation() : [];
+        restoreConversation(past);
+        ready("Online · curious about everything", past.length
+          ? "Oh, hey, you're back. Where were we?"
+          : known?.count
+            ? "Oh, hey, it's you again. What's new?"
+            : "Hey. I'm Delta — I've only been around since September, so everything's still new. What's your name?");
       } catch {
         statusEl.textContent = "Offline right now";
         dotEl.className = "dot offline";
@@ -1287,8 +1308,8 @@
           code = result.code;
           claimInput.value = "";
           pinInput.value = "";
-          statusEl.textContent = `Welcome back! She remembers ${result.count} thing${result.count === 1 ? "" : "s"} about you.`;
-          refresh();
+          statusEl.textContent = "Welcome back! Loading your conversation...";
+          setTimeout(() => location.reload(), 900);
         } catch (err) {
           statusEl.textContent = err.message;
           pinInput.value = "";
@@ -1302,13 +1323,33 @@
           useVisitor(crypto.randomUUID()); // start over as someone new
           await hello();
           statusEl.textContent = "Done. She's forgotten everything about you.";
+          clearConversation();
           refresh();
         } catch (err) {
           statusEl.textContent = err.message;
         }
       });
 
-      return { hello, get visitor() { return visitor; } };
+      document.getElementById("memory-clear-chat").addEventListener("click", async () => {
+        if (!confirm("Clear your conversation with Delta? Her notes about you stay.")) return;
+        try {
+          await call("clearChat");
+          clearConversation();
+          statusEl.textContent = "Conversation cleared.";
+        } catch (err) {
+          statusEl.textContent = err.message;
+        }
+      });
+
+      async function loadConversation() {
+        try {
+          return (await call("history")).messages;
+        } catch {
+          return [];
+        }
+      }
+
+      return { hello, loadConversation, get visitor() { return visitor; } };
     })();
 
     // ---- Voice: Delta speaks her replies through the voice server on the owner's PC ----
