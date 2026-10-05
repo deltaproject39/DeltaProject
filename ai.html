@@ -353,6 +353,17 @@
       color: var(--user-text);
       border-bottom-right-radius: 6px;
     }
+    .wake {
+      align-self: center;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 10px;
+      margin: 12px 0;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+    .wake p { margin: 0; }
     .notice {
       align-self: center;
       text-align: center;
@@ -1083,11 +1094,14 @@
       loadBtn.hidden = true;
       input.disabled = false;
       sendBtn.disabled = false;
+      input.placeholder = "Say something to Delta...";
       input.focus();
       character.set("idle");
       character.wave();
-      addMessage("delta", greeting);
-      character.talk();
+      if (greeting) {
+        addMessage("delta", greeting);
+        character.talk();
+      }
     }
 
     // Puts a saved conversation back on screen and into her context.
@@ -1105,27 +1119,168 @@
       history.length = 0;
     }
 
-    async function connectToDelta() {
+    // ---- Presence: asleep, awake or offline ----
+    // She starts asleep. Waking her takes a click, which is also what browsers require before a
+    // page may play sound, so her greeting can be spoken. Every 30 seconds the page checks on
+    // her: if her PC goes offline or she's put to sleep, she falls asleep here too, and she wakes
+    // again when she's back (following a new tunnel address if it changed).
+    let presence = "connecting"; // "awake" | "asleep" | "offline"
+    let woken = false;           // has this visitor woken her (and so unlocked sound)?
+    let wakePrompt = null;
+    let misses = 0;
+    const FALLBACK_GREETINGS = [
+      "Hey. I'm here.",
+      "Oh. Hi.",
+      "There you are.",
+      "Hey. What's on your mind?",
+    ];
+
+    async function fetchConfig() {
       try {
-        const config = await (await fetch("config.json", { cache: "no-store" })).json();
-        const res = await fetch(config.deltaServer + "/health", { signal: AbortSignal.timeout(5000) });
-        if (!res.ok) throw new Error();
-        deltaServer = config.deltaServer;
-        const known = await memoryBook.hello();
-        const past = known ? await memoryBook.loadConversation() : [];
-        restoreConversation(past);
-        ready("Online · curious about everything", past.length
-          ? "Oh, hey, you're back. Where were we?"
-          : known?.count
-            ? "Oh, hey, it's you again. What's new?"
-            : "Hey. I'm Delta — I've only been around since September, so everything's still new. What's your name?");
+        return await (await fetch("config.json", { cache: "no-store" })).json();
       } catch {
+        return null;
+      }
+    }
+
+    async function ping(server) {
+      if (!server) return null;
+      try {
+        const res = await fetch(server + "/health", { cache: "no-store", signal: AbortSignal.timeout(5000) });
+        return res.ok ? await res.json() : null;
+      } catch {
+        return null;
+      }
+    }
+
+    function setInputs(enabled, placeholder) {
+      input.disabled = !enabled;
+      sendBtn.disabled = !enabled;
+      input.placeholder = placeholder;
+    }
+
+    function showWakePrompt(label) {
+      if (wakePrompt) wakePrompt.remove();
+      wakePrompt = document.createElement("div");
+      wakePrompt.className = "wake";
+      const text = document.createElement("p");
+      text.textContent = "Delta is asleep.";
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = label;
+      button.addEventListener("click", () => wake(true));
+      wakePrompt.append(text, button);
+      chatEl.append(wakePrompt);
+      scrollDown();
+    }
+
+    function setPresence(next) {
+      if (next === presence) return;
+      const before = presence;
+      presence = next;
+      if (next === "awake") {
+        dotEl.className = "dot online";
+        statusEl.textContent = "Online · curious about everything";
+        setInputs(true, "Say something to Delta...");
+        if (before === "asleep" || before === "offline") {
+          addNotice("Delta's back.");
+          if (woken) wake(true); else showWakePrompt("👋 Wake her up");
+        }
+        return;
+      }
+      // Asleep or offline: she closes her eyes and the chat waits.
+      voice.stop();
+      character.set("sleeping");
+      dotEl.className = "dot offline";
+      const asleep = next === "asleep";
+      statusEl.textContent = asleep ? "Asleep 💤" : "Offline right now";
+      setInputs(false, asleep ? "Delta is sleeping. Come back a bit later." : "Delta is offline. She'll be back when her PC is on.");
+      if (wakePrompt) wakePrompt.remove();
+      if (before !== "connecting") addNotice(asleep ? "Delta fell asleep." : "Delta went offline, so she's asleep for now.");
+    }
+
+    // Wakes her up. With `greet`, she says hello in her own words (out loud if sound is allowed).
+    async function wake(greet) {
+      if (presence !== "awake") return;
+      woken = true;
+      voice.unlock();
+      if (wakePrompt) {
+        wakePrompt.remove();
+        wakePrompt = null;
+      }
+      ready("Online · curious about everything", null);
+      if (!greet) return;
+
+      const bubble = addMessage("delta", null);
+      let greeting = null;
+      try {
+        const res = await fetch(deltaServer + "/greet", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ visitor: memoryBook.visitor }),
+        });
+        if (res.ok) greeting = (await res.json()).greeting;
+      } catch {}
+      greeting ||= FALLBACK_GREETINGS[Math.floor(Math.random() * FALLBACK_GREETINGS.length)];
+      bubble.textContent = greeting;
+      history.push({ role: "assistant", content: greeting });
+      takeSentences(greeting, true).sentences.forEach(express);
+      if (!voice.active()) character.talk();
+      scrollDown();
+    }
+
+    async function checkOn() {
+      if (engine) return; // she's in backup mode on this device
+      let health = await ping(deltaServer);
+      if (!health) {
+        // Her tunnel may have a new address (e.g. after a restart).
+        const config = await fetchConfig();
+        if (config?.deltaServer && config.deltaServer !== deltaServer) {
+          health = await ping(config.deltaServer);
+          if (health) {
+            if (!deltaServer) return location.reload(); // she came online after this page loaded
+            deltaServer = config.deltaServer;
+          }
+        }
+      }
+      if (!health) {
+        if (++misses >= 2) setPresence("offline");
+        return;
+      }
+      misses = 0;
+      setPresence(health.asleep ? "asleep" : "awake");
+      if (presence === "awake" && woken) {
+        // While she's out roaming, her status line says what she's reading.
+        const roam = await roaming.fetchRoam();
+        statusEl.textContent = roam?.now ? `Online · ${roam.now.charAt(0).toLowerCase() + roam.now.slice(1)}` : "Online · curious about everything";
+      }
+    }
+
+    async function connectToDelta() {
+      const config = await fetchConfig();
+      const health = await ping(config?.deltaServer);
+      if (!health) {
+        presence = "offline";
         statusEl.textContent = "Offline right now";
         dotEl.className = "dot offline";
         character.set("sleeping");
         addNotice("Delta is asleep at the moment. You can load a small backup AI instead — it's a ~300 MB one-time download that runs on your own device.");
         loadBtn.hidden = false;
+        setInputs(false, "Delta is offline. She'll be back when her PC is on.");
+        setInterval(checkOn, 30000);
+        return;
       }
+      deltaServer = config.deltaServer;
+      const known = await memoryBook.hello();
+      restoreConversation(known ? await memoryBook.loadConversation() : []);
+      setPresence(health.asleep ? "asleep" : "awake");
+      if (presence === "awake") {
+        statusEl.textContent = "Online · asleep for now";
+        showWakePrompt("👋 Wake her up");
+      } else {
+        addNotice("Delta is sleeping right now. She'll be up later.");
+      }
+      setInterval(checkOn, 30000);
     }
 
     loadBtn.addEventListener("click", async () => {
@@ -1441,13 +1596,6 @@
       });
       document.getElementById("roam-close").addEventListener("click", () => dialog.close());
 
-      // While she's out roaming, her status line says what she's reading.
-      setInterval(async () => {
-        if (!deltaServer || engine) return;
-        const data = await fetchRoam();
-        statusEl.textContent = data?.now ? `Online · ${data.now.charAt(0).toLowerCase() + data.now.slice(1)}` : "Online · curious about everything";
-      }, 30000);
-
       return { fetchRoam };
     })();
 
@@ -1627,6 +1775,7 @@
       input.disabled = true;
       sendBtn.disabled = true;
 
+      if (!engine && !woken) await wake(false);
       voice.unlock();
       voice.stop();
       addMessage("user", text);

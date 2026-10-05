@@ -3,6 +3,8 @@
 // speech/emotion requests (text only) to Delta's voice server, and memory requests to
 // memory.js, with size limits and per-visitor rate limits. Everything else is refused.
 // Run: node server/gatekeeper.js
+// Closing it (Ctrl+C, closing the window, or start-delta.ps1 taking her offline) puts Delta to
+// sleep gracefully: she finishes any note she's writing and everything is saved first.
 
 const http = require("http");
 const memory = require("./memory");
@@ -40,6 +42,12 @@ let ttsActive = 0;
 
 function visitorId(req) {
   return req.headers["cf-connecting-ip"] || req.socket.remoteAddress;
+}
+
+// Requests from this PC itself. Anything through the tunnel carries Cloudflare's
+// CF-Connecting-IP header, which outsiders can't remove.
+function isFromThisPC(req) {
+  return !req.headers["cf-connecting-ip"] && ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(req.socket.remoteAddress);
 }
 
 function rateLimited(map, id, limit) {
@@ -171,6 +179,72 @@ async function speak(res, cors, body) {
   }
 }
 
+// "a few minutes" / "3 hours" / "2 days"
+function ago(ms) {
+  const minutes = Math.round(ms / 60000);
+  if (minutes < 10) return "just a few minutes";
+  if (minutes < 90) return `about ${minutes} minutes`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `about ${hours} hours`;
+  return `about ${Math.round(hours / 24)} days`;
+}
+
+// A greeting in her own words when someone opens the chat: she knows whether they're new, how
+// long it's been, what she remembers about them, and what she's been up to in her free time.
+async function greet(res, cors, body) {
+  let visitor = null;
+  try {
+    visitor = JSON.parse(body).visitor;
+  } catch {}
+  if (active >= MAX_CONCURRENT) return send(res, 503, { error: "Delta is busy right now." }, cors);
+
+  active++;
+  try {
+    const persona = await memory.personaPrompt();
+    const self = await memory.selfSection("").catch(() => "");
+    const notes = await memory.recall(visitor, "who this person is").catch(() => []);
+    const past = memory.history(visitor, 8)
+      .map((m) => ({ role: m.role === "user" ? "user" : "assistant", content: m.content.slice(0, MAX_MESSAGE_CHARS) }));
+    const last = memory.lastTalk(visitor);
+    const trip = memory.explorations(1).trips[0];
+
+    const situation = last
+      ? `This person just came back to the chat. You last talked ${ago(Date.now() - last)} ago.`
+      : notes.length
+        ? "This person is back. You remember them, though you haven't talked in this chat window before."
+        : "Someone new just opened the chat for the first time. You don't know them yet.";
+    const freeTime = trip && Date.now() - trip.created < 2 * 86400000 && Math.random() < 0.6
+      ? ` If it feels natural, you could mention something from your own free time: you recently read about ${trip.path}.`
+      : "";
+    const system = [persona, self, notes.length ? memory.note(notes) : ""].filter(Boolean).join("\n\n");
+    const messages = [
+      ...(system ? [{ role: "system", content: system }] : []),
+      ...past,
+      {
+        role: "user",
+        content: `(Not something they said, just what's happening: ${situation}${freeTime} ` +
+          "Greet them in one or two short sentences, in your own voice. Don't recap or list what you remember.)",
+      },
+    ];
+
+    const upstream = await fetch(`${OLLAMA}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: MODEL, messages, stream: false, options: { num_predict: 80, temperature: 0.9 } }),
+    });
+    if (!upstream.ok) throw new Error(`Ollama returned ${upstream.status}`);
+    const greeting = (await upstream.json()).message.content.trim()
+      .split("\n").filter((line) => line.trim())[0]?.replace(/^["“]|["”]$/g, "").trim();
+    if (!greeting) throw new Error("Empty greeting");
+    send(res, 200, { greeting }, cors);
+  } catch (err) {
+    console.error("Greeting:", err.message);
+    send(res, 502, { error: "Delta couldn't say hello just now." }, cors);
+  } finally {
+    active--;
+  }
+}
+
 function send(res, status, obj, headers = {}) {
   res.writeHead(status, { "Content-Type": "application/json", ...headers });
   res.end(JSON.stringify(obj));
@@ -207,7 +281,25 @@ const server = http.createServer((req, res) => {
   }
 
   if (req.method === "GET" && req.url === "/health") {
-    return send(res, 200, { ok: true, model: MODEL }, cors);
+    return send(res, 200, { ok: true, model: MODEL, asleep: memory.sleepState().asleep }, cors);
+  }
+
+  // start-delta.ps1 asks for a graceful sleep before taking her offline (this PC only).
+  if (req.method === "POST" && req.url === "/owner/sleep-and-close" && isFromThisPC(req)) {
+    send(res, 200, { ok: true });
+    return goToSleep("start-delta.ps1");
+  }
+
+  // While she's asleep (or falling asleep) she doesn't chat or greet anyone.
+  if (req.method === "POST" && (req.url === "/chat" || req.url === "/greet") && (closing || memory.sleepState().asleep)) {
+    return send(res, 503, { error: "Delta is asleep right now.", asleep: true }, cors);
+  }
+
+  if (req.method === "POST" && req.url === "/greet") {
+    if (rateLimited(hits, visitorId(req), RATE_LIMIT)) {
+      return send(res, 429, { error: "Slow down a bit and try again in a minute." }, cors);
+    }
+    return readBody(req, res, cors, (body) => greet(res, cors, body));
   }
 
   if (req.method === "POST" && req.url === "/tts") {
@@ -326,8 +418,38 @@ const server = http.createServer((req, res) => {
   });
 });
 
-// She reflects and writes her diary in the background, only while nobody is waiting on a reply.
-memory.startGrowing(() => active === 0);
+// She reflects, roams and writes her diary in the background, only while she's awake and nobody
+// is waiting on a reply.
+memory.startGrowing(() => active === 0 && !closing && !memory.sleepState().asleep);
+
+// Waking up: if she went to sleep because the server was closed, she wakes now. If you put her to
+// sleep yourself, she stays asleep until you wake her (node server/delta-self.js wake).
+const slept = memory.sleepState();
+if (slept.asleep && slept.reason !== "manual") {
+  memory.wakeUp();
+  console.log("Delta woke up.");
+} else if (slept.asleep) {
+  console.log("Delta is asleep (you put her to sleep). Wake her with: node server/delta-self.js wake");
+}
+
+// Going to sleep: stop taking new conversations, let her finish any note she's writing, make sure
+// everything is saved to disk, then exit. (A hard kill can't be caught, but everything she knows is
+// already saved as it happens; the most it could cost is a note she was halfway through.)
+let closing = false;
+async function goToSleep(why) {
+  if (closing) return;
+  closing = true;
+  console.log(`\nDelta is going to sleep (${why})...`);
+  server.close();
+  memory.fallAsleep("shutdown");
+  await memory.settle(6000);
+  memory.close();
+  console.log("Delta is asleep. Everything she knows is saved.");
+  process.exit(0);
+}
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK"]) {
+  process.on(signal, () => goToSleep(signal));
+}
 
 // Listen on localhost only; the tunnel is the only way in from outside.
 server.listen(PORT, "127.0.0.1", () => {

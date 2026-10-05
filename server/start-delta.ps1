@@ -44,7 +44,11 @@ Write-Host "Delta is online! (site updates in about a minute)" -ForegroundColor 
 Write-Host "https://deltaproject39.github.io/DeltaProject/ai.html"
 Write-Host "Voice Lab (this PC only): http://localhost:8788/lab"
 Write-Host ""
-Read-Host "Press Enter to take Delta offline"
+Read-Host "Press Enter to put Delta to sleep and take her offline"
+
+# Let her fall asleep properly (finish any note, save everything) before closing the rest.
+try { Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8787/owner/sleep-and-close" -TimeoutSec 5 | Out-Null } catch {}
+Wait-Process -Id $gatekeeper.Id -Timeout 10 -ErrorAction SilentlyContinue
 
 Stop-Process -Id $voice.Id, $gatekeeper.Id, $tunnel.Id -ErrorAction SilentlyContinue
 Write-Host "Delta is offline."

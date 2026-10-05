@@ -756,6 +756,48 @@ function selfNotes() {
   return db.prepare("SELECT text, source, created FROM self_notes ORDER BY created").all();
 }
 
+// ---- Sleep ----
+//
+// While asleep she doesn't chat or roam. "manual" sleep (you put her to sleep) lasts until you wake
+// her; "shutdown" sleep (the server was closed) ends when the server starts again.
+
+function sleepState() {
+  return { asleep: getMeta("asleep") === "1", reason: getMeta("asleep_reason"), since: Number(getMeta("asleep_since") || 0) };
+}
+
+function fallAsleep(reason) {
+  if (sleepState().asleep && getMeta("asleep_reason") === "manual") return; // already asleep on purpose
+  setMeta("asleep", "1");
+  setMeta("asleep_reason", reason);
+  setMeta("asleep_since", Date.now());
+}
+
+function wakeUp() {
+  const was = sleepState();
+  setMeta("asleep", "0");
+  setMeta("woke_at", Date.now());
+  return was;
+}
+
+// Lets any note she's in the middle of writing finish, up to `ms`.
+function settle(ms) {
+  return Promise.race([queue.catch(() => {}), new Promise((resolve) => setTimeout(resolve, ms))]);
+}
+
+// Folds the write-ahead log into the database file and closes it cleanly.
+function close() {
+  try {
+    db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    db.close();
+  } catch {}
+}
+
+// When this visitor last talked to her (ms), or 0 if never.
+function lastTalk(visitor) {
+  if (!isVisitorId(visitor)) return 0;
+  return db.prepare("SELECT MAX(created) AS t FROM messages WHERE visitor = ?").get(visitor).t || 0;
+}
+
 // For the website's "What Delta's been exploring": her trips, never her private reflections or diary.
 function explorations(limit = 20) {
   return {
@@ -768,4 +810,5 @@ function explorations(limit = 20) {
 module.exports = {
   hello, claim, list, forget, forgetEverything, recall, note, learn, saveExchange, history, clearHistory,
   personaPrompt, selfSection, startGrowing, reflectIfDue, diaryIfDue, journal, selfNotes, roam, explorations,
+  sleepState, fallAsleep, wakeUp, settle, close, lastTalk,
 };

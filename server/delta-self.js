@@ -5,6 +5,8 @@
 //        node server/delta-self.js diary      write a diary entry now from her recent reflections
 //        node server/delta-self.js roam       let her go roaming the web, following her curiosity
 //        node server/delta-self.js roam "deep sea creatures"   ...or send her somewhere to start
+//        node server/delta-self.js sleep      put her to sleep (no chatting or roaming) until you wake her
+//        node server/delta-self.js wake       wake her up
 
 const memory = require("./memory");
 
@@ -29,7 +31,15 @@ function show() {
 
 (async () => {
   const command = process.argv[2];
-  if (command === "reflect") {
+  if (command === "sleep") {
+    memory.fallAsleep("manual");
+    console.log("Delta is asleep. Visitors will see her sleeping; she won't chat or roam until you wake her.");
+    process.exit(0);
+  } else if (command === "wake") {
+    const was = memory.wakeUp();
+    console.log(was.asleep ? "Delta is awake." : "She was already awake.");
+    process.exit(0);
+  } else if (command === "reflect") {
     console.log("Delta is reflecting... (this takes a little while)");
     const n = await memory.reflectIfDue(true);
     console.log(n ? `She reflected on ${n} conversation${n === 1 ? "" : "s"}.` : "Nothing new to reflect on.");
