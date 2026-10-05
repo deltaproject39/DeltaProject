@@ -28,7 +28,7 @@ LAB_PAGE = HERE / "voice-lab.html"
 FFMPEG = "ffmpeg"  # see find_ffmpeg()
 MAX_CHARS = 1000
 
-DEFAULTS = {"voice": "af_heart", "speed": 1.0, "pitch": 0.0, "natural": True}
+DEFAULTS = {"voice": "af_heart", "speed": 1.0, "pitch": 0.0}
 
 
 def find_ffmpeg():
@@ -58,7 +58,6 @@ def clean_settings(raw, voices):
         "voice": s["voice"] if s["voice"] in voices else DEFAULTS["voice"],
         "speed": float(min(2.0, max(0.5, float(s["speed"])))),
         "pitch": float(min(12.0, max(-12.0, float(s["pitch"])))),
-        "natural": bool(s["natural"]),
     }
 
 
@@ -69,21 +68,25 @@ lock = threading.Lock()  # one synthesis at a time keeps the CPU free for Ollama
 
 
 def synthesize(text, settings):
-    """Returns WAV bytes."""
+    """Returns WAV bytes.
+
+    Pitch works like changing a record's speed: Kokoro speaks more slowly than asked (its own,
+    natural-sounding speed control), then the audio is resampled faster, which raises the pitch
+    and brings the speed back. Nothing is time-stretched, so there are no robotic artifacts;
+    the voice's tone moves with the pitch (higher sounds younger).
+    """
+    ratio = 2 ** (settings["pitch"] / 12) if ffmpeg else 1.0
+    speak_speed = min(2.0, max(0.5, settings["speed"] / ratio))
     with lock:
-        samples, rate = kokoro.create(text, voice=settings["voice"], speed=settings["speed"], lang="en-us")
+        samples, rate = kokoro.create(text, voice=settings["voice"], speed=speak_speed, lang="en-us")
     buf = io.BytesIO()
     sf.write(buf, np.asarray(samples), rate, format="WAV", subtype="PCM_16")
     wav = buf.getvalue()
-    if abs(settings["pitch"]) < 0.01 or not ffmpeg:
+    if abs(ratio - 1) < 0.001:
         return wav
-    # Rubber Band shifts pitch without changing speed. "Natural" keeps the voice's tone
-    # (formants) so higher/lower sounds like the same person rather than a chipmunk.
-    ratio = 2 ** (settings["pitch"] / 12)
-    formant = "preserved" if settings["natural"] else "shifted"
     result = subprocess.run(
         [ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "wav", "-i", "pipe:0",
-         "-af", f"rubberband=pitch={ratio:.5f}:formant={formant}", "-f", "wav", "pipe:1"],
+         "-af", f"asetrate={rate * ratio:.2f},aresample={rate}:resampler=soxr", "-f", "wav", "pipe:1"],
         input=wav, capture_output=True, check=True,
     )
     return result.stdout

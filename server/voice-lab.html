@@ -58,7 +58,6 @@
       border-radius: 10px;
     }
     textarea { resize: vertical; min-height: 70px; }
-    .check { display: flex; align-items: center; gap: 8px; font-weight: 400; margin-top: 14px; }
     .hint { color: var(--muted); font-size: 0.8rem; margin: 4px 0 0; }
     .buttons { display: flex; gap: 10px; margin-top: 24px; flex-wrap: wrap; }
     button {
@@ -96,8 +95,7 @@
       <input type="range" id="pitch" min="-12" max="12" step="0.5">
       <span class="value" id="pitch-value"></span>
     </div>
-    <label class="check"><input type="checkbox" id="natural"> Keep natural tone</label>
-    <p class="hint">On: higher/lower but the same person. Off: a younger/older-sounding voice (more "anime" when higher).</p>
+    <p class="hint">Higher sounds younger and lighter, lower sounds older and deeper. Small steps (±1–4) sound most natural.</p>
 
     <label for="text">Test sentence</label>
     <textarea id="text">Hey. I'm Delta. I've only been around since September, so everything's still new. What's your name?</textarea>
@@ -120,7 +118,6 @@
         voice: $("voice").value,
         speed: Number($("speed").value),
         pitch: Number($("pitch").value),
-        natural: $("natural").checked,
       };
     }
 
@@ -128,7 +125,6 @@
       $("voice").value = settings.voice;
       $("speed").value = settings.speed;
       $("pitch").value = settings.pitch;
-      $("natural").checked = settings.natural;
       updateLabels();
     }
 
@@ -181,7 +177,7 @@
     });
 
     $("reset").addEventListener("click", () => {
-      show({ voice: "af_heart", speed: 1, pitch: 0, natural: true });
+      show({ voice: "af_heart", speed: 1, pitch: 0 });
       status("Reset to defaults (not saved yet).");
     });
 
