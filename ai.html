@@ -212,7 +212,7 @@
       width: 0;
       border-radius: inherit;
       background: var(--c);
-      transition: width 0.6s ease;
+      transition: width 0.3s linear;
     }
     .emotions .pct { text-align: right; font-variant-numeric: tabular-nums; }
 
@@ -433,6 +433,70 @@
 
     document.getElementById("header-avatar").prepend(makeAvatar());
 
+    // ---- Mood: Delta's emotional state, which builds up with each event and fades over time ----
+    const mood = (() => {
+      const KEYS = ["happy", "sad", "angry", "surprised", "curious", "scared", "neutral"];
+      // Her resting temperament: mostly calm, a little curious, a little happy. That's who she is.
+      const BASELINE = { happy: 0.15, sad: 0, angry: 0, surprised: 0, curious: 0.25, scared: 0, neutral: 0.6 };
+      // Seconds for a feeling to fade halfway back to baseline: surprise passes fast, sadness lingers.
+      const HALF_LIFE = { happy: 90, sad: 150, angry: 60, surprised: 12, curious: 45, scared: 40, neutral: 30 };
+      // Feeling one thing pushes its opposites down.
+      const OPPOSITES = {
+        happy: ["sad", "angry", "scared"],
+        sad: ["happy"],
+        angry: ["happy"],
+        scared: ["happy"],
+        surprised: [],
+        curious: [],
+      };
+      const STORE = "delta-mood";
+      let state = { ...BASELINE };
+
+      function fade(seconds) {
+        for (const k of KEYS) {
+          state[k] = BASELINE[k] + (state[k] - BASELINE[k]) * Math.pow(0.5, seconds / HALF_LIFE[k]);
+        }
+      }
+
+      function save() {
+        try { localStorage.setItem(STORE, JSON.stringify({ state, at: Date.now() })); } catch {}
+      }
+
+      // Pick up where she left off, minus however much has faded while the visitor was away.
+      try {
+        const saved = JSON.parse(localStorage.getItem(STORE));
+        if (saved?.state) {
+          state = { ...BASELINE, ...saved.state };
+          fade((Date.now() - saved.at) / 1000);
+        }
+      } catch {}
+
+      // groups: how strongly an event carries each feeling (0..1); weight: how much it moves her.
+      function feel(groups, weight) {
+        if (!groups) return;
+        for (const k of KEYS) {
+          if (k === "neutral") continue;
+          const push = (groups[k] || 0) * weight;
+          if (push < 0.01) continue;
+          state[k] += push * (1 - state[k]);
+          for (const o of OPPOSITES[k]) state[o] *= 1 - 0.6 * push;
+          state.neutral *= 1 - 0.5 * push; // anything strong unsettles her calm
+        }
+        state.neutral += (groups.neutral || 0) * weight * 0.5 * (1 - state.neutral);
+        save();
+      }
+
+      let last = performance.now();
+      setInterval(() => {
+        const now = performance.now();
+        fade((now - last) / 1000);
+        last = now;
+      }, 200);
+      setInterval(save, 5000);
+
+      return { feel, get state() { return state; } };
+    })();
+
     // ---- Character: Delta's VRM model, animated with three.js + three-vrm ----
     const character = (() => {
       const stage = document.getElementById("stage");
@@ -528,16 +592,25 @@
           out.happy = 0.15;
         }
 
-        // Her current feeling shows on her face and in how she holds her head.
+        // Her mood shows all the time, softly.
+        const m = mood.state;
+        out.happy = Math.max(out.happy, 0.5 * m.happy);
+        out.sad = 0.6 * m.sad;
+        out.angry = 0.5 * m.angry;
+        out.surprised = 0.6 * m.surprised + 0.2 * m.scared;
+        out.ly += 0.3 * m.sad;
+        out.tilt += 0.5 * m.curious - 0.3 * m.angry;
+
+        // The feeling of the sentence she's saying right now shows more strongly.
         if (t < feeling.until) {
           const s = feeling.strength * Math.min(1, (feeling.until - t) / 800);
           switch (feeling.emotion) {
             case "happy": out.happy = Math.max(out.happy, 0.6 * s); out.tilt += 0.4 * s; break;
-            case "sad": out.sad = 0.7 * s; out.ly += 0.35 * s; break;
-            case "angry": out.angry = 0.6 * s; out.tilt -= 0.3 * s; break;
-            case "surprised": out.surprised = 0.8 * s; out.ly -= 0.25 * s; break;
-            case "curious": out.surprised = 0.3 * s; out.tilt += 0.9 * s; break;
-            case "scared": out.sad = 0.4 * s; out.surprised = 0.4 * s; break;
+            case "sad": out.sad = Math.max(out.sad, 0.7 * s); out.ly += 0.35 * s; break;
+            case "angry": out.angry = Math.max(out.angry, 0.6 * s); out.tilt -= 0.3 * s; break;
+            case "surprised": out.surprised = Math.max(out.surprised, 0.8 * s); out.ly -= 0.25 * s; break;
+            case "curious": out.surprised = Math.max(out.surprised, 0.3 * s); out.tilt += 0.9 * s; break;
+            case "scared": out.sad = Math.max(out.sad, 0.4 * s); out.surprised = Math.max(out.surprised, 0.4 * s); break;
           }
         }
 
@@ -965,8 +1038,8 @@
       for await (const chunk of stream) yield chunk.choices[0]?.delta?.content || "";
     }
 
-    // ---- Emotion panel: how strongly she feels each emotion right now ----
-    const emotionPanel = (() => {
+    // ---- Emotion panel: a live bar for each of her feelings ----
+    (() => {
       const FEELINGS = [
         ["happy", "😊", "Happy", "#f5b83d"],
         ["sad", "😢", "Sad", "#5b8def"],
@@ -976,7 +1049,6 @@
         ["scared", "😨", "Scared", "#8a8fa3"],
         ["neutral", "😌", "Calm", "#9ac46b"],
       ];
-      const CALM = { neutral: 1 };
       const list = document.getElementById("emotions");
       const rows = {};
       for (const [key, emoji, name, color] of FEELINGS) {
@@ -986,8 +1058,6 @@
         list.append(li);
         rows[key] = { li, fill: li.querySelector(".fill"), pct: li.querySelector(".pct") };
       }
-      let resetTimer = null;
-
       function render(groups) {
         const top = Object.entries(groups).sort((a, b) => b[1] - a[1])[0]?.[0];
         for (const [key, row] of Object.entries(rows)) {
@@ -998,16 +1068,9 @@
         }
       }
 
-      // Show a reading for `ms`, then settle back to calm.
-      function show(groups, ms = 3500) {
-        if (!groups) return;
-        render(groups);
-        clearTimeout(resetTimer);
-        resetTimer = setTimeout(() => render(CALM), ms);
-      }
-
-      render(CALM);
-      return { show };
+      // The bars follow her mood live: they jump when something moves her and drift as it fades.
+      setInterval(() => render(mood.state), 150);
+      render(mood.state);
     })();
 
     // ---- Voice: Delta speaks her replies through the voice server on the owner's PC ----
@@ -1071,7 +1134,7 @@
         if (clip.feeling) {
           const ms = clip.buffer.duration * 1000 + 600;
           character.feel(clip.feeling.emotion, clip.feeling.score, ms);
-          emotionPanel.show(clip.feeling.groups, ms);
+          mood.feel(clip.feeling.groups, 0.35);
         }
         return new Promise((resolve) => {
           const source = ctx.createBufferSource();
@@ -1155,7 +1218,7 @@
       readEmotion(sentence).then((f) => {
         if (!f) return;
         character.feel(f.emotion, f.score);
-        emotionPanel.show(f.groups);
+        mood.feel(f.groups, 0.35);
       });
     }
 
@@ -1188,10 +1251,19 @@
       character.set("thinking");
       // While she thinks, her face reacts to what you said: concern for bad news, a smile for good.
       readEmotion(text).then((f) => {
+        if (!f) return;
+        // She feels with you: your sadness, fear or anger makes her sad for you; your joy is hers.
+        const u = f.groups;
+        mood.feel({
+          happy: u.happy,
+          sad: Math.max(u.sad, u.scared * 0.7, u.angry * 0.4),
+          surprised: u.surprised * 0.8,
+          curious: u.curious,
+          scared: u.scared * 0.4,
+          neutral: u.neutral,
+        }, 0.5);
         const empathy = { sad: "sad", scared: "sad", angry: "sad", happy: "happy", surprised: "surprised", curious: "curious" };
-        if (!f || !empathy[f.emotion] || character.state !== "thinking") return;
-        character.feel(empathy[f.emotion], f.score * 0.7, 6000);
-        emotionPanel.show({ [empathy[f.emotion]]: f.score * 0.7, neutral: f.groups?.neutral ?? 0 }, 6000);
+        if (empathy[f.emotion] && character.state === "thinking") character.feel(empathy[f.emotion], f.score * 0.7, 6000);
       });
 
       try {
