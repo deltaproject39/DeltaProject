@@ -242,6 +242,7 @@
     }
     .sheet form { display: flex; gap: 8px; }
     .sheet input { padding: 8px 12px; font-size: 0.95rem; }
+    .sheet input.pin { flex: 0 0 5.5em; }
     .sheet button { padding: 8px 14px; font-size: 0.9rem; }
     .sheet .plain {
       color: var(--text);
@@ -471,6 +472,7 @@
     <h3>On another device already?</h3>
     <form id="memory-claim">
       <input id="memory-claim-input" placeholder="e.g. sunny-otter-4821" autocomplete="off" required aria-label="Memory code">
+      <input id="memory-claim-pin" class="pin" type="password" inputmode="numeric" maxlength="8" placeholder="PIN" autocomplete="off" aria-label="PIN, if the code has one">
       <button>Use code</button>
     </form>
 
@@ -1197,6 +1199,7 @@
       const listEl = document.getElementById("memory-list");
       const statusEl = document.getElementById("memory-status");
       const claimInput = document.getElementById("memory-claim-input");
+      const pinInput = document.getElementById("memory-claim-pin");
 
       function useVisitor(id) {
         visitor = id;
@@ -1279,14 +1282,16 @@
       document.getElementById("memory-claim").addEventListener("submit", async (e) => {
         e.preventDefault();
         try {
-          const result = await call("claim", { code: claimInput.value });
+          const result = await call("claim", { code: claimInput.value, pin: pinInput.value || undefined });
           useVisitor(result.visitor);
           code = result.code;
           claimInput.value = "";
+          pinInput.value = "";
           statusEl.textContent = `Welcome back! She remembers ${result.count} thing${result.count === 1 ? "" : "s"} about you.`;
           refresh();
         } catch (err) {
           statusEl.textContent = err.message;
+          pinInput.value = "";
         }
       });
 

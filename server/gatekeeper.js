@@ -87,8 +87,14 @@ function handleMemory(req, res, cors, body) {
       if (rateLimited(claimHits, visitorId(req), CLAIM_RATE_LIMIT)) {
         return send(res, 429, { error: "Too many tries. Wait a minute and try again." }, cors);
       }
-      const result = memory.claim(msg.code, msg.visitor);
-      return result ? send(res, 200, result, cors) : send(res, 404, { error: "No memories found for that code." }, cors);
+      const result = memory.claim(msg.code, msg.pin, msg.visitor);
+      switch (result.error) {
+        case undefined: return send(res, 200, result, cors);
+        case "notfound": return send(res, 404, { error: "No memories found for that code." }, cors);
+        case "needpin": return send(res, 401, { error: "This ID is protected. Enter its PIN too.", needPin: true }, cors);
+        case "badpin": return send(res, 401, { error: "Wrong PIN.", needPin: true }, cors);
+        default: return send(res, 429, { error: `Too many wrong PINs. Try again in ${result.minutes} minutes.` }, cors);
+      }
     }
     case "list":
       return send(res, 200, { memories: memory.list(msg.visitor) }, cors);

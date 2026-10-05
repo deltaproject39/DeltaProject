@@ -49,9 +49,33 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS memories_by_visitor ON memories(visitor);
 `);
-// "keep" marks visitors that are never tidied away, e.g. custom IDs set with set-code.js.
-if (!db.prepare("PRAGMA table_info(visitors)").all().some((c) => c.name === "keep")) {
-  db.exec("ALTER TABLE visitors ADD COLUMN keep INTEGER NOT NULL DEFAULT 0");
+// Columns added after the first version:
+//   keep         - never tidied away (custom IDs set with set-code.js / set-pin.js)
+//   pin_hash/... - optional PIN needed to use the code on another device (see set-pin.js)
+//   fails/locked - wrong-PIN counter and lockout
+const COLUMNS = {
+  keep: "INTEGER NOT NULL DEFAULT 0",
+  pin_hash: "TEXT",
+  pin_salt: "TEXT",
+  fails: "INTEGER NOT NULL DEFAULT 0",
+  locked_until: "INTEGER NOT NULL DEFAULT 0",
+};
+const existing = new Set(db.prepare("PRAGMA table_info(visitors)").all().map((c) => c.name));
+for (const [name, type] of Object.entries(COLUMNS)) {
+  if (!existing.has(name)) db.exec(`ALTER TABLE visitors ADD COLUMN ${name} ${type}`);
+}
+db.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)");
+
+const MAX_PIN_FAILS = 5;
+const LOCK_MINUTES = 15;
+
+function hashPin(pin, salt) {
+  return crypto.scryptSync(String(pin), salt, 32).toString("hex");
+}
+
+function pinMatches(pin, row) {
+  const given = Buffer.from(hashPin(pin, row.pin_salt), "hex");
+  return crypto.timingSafeEqual(given, Buffer.from(row.pin_hash, "hex"));
 }
 
 const isVisitorId = (id) => typeof id === "string" && /^[0-9a-f-]{36}$/.test(id);
@@ -87,26 +111,50 @@ function hello(visitor) {
 // A memory code typed on another device gives back that visitor's ID. The device's own ID is
 // usually brand new and empty, so it's dropped rather than left behind; one that already has
 // memories is kept.
-function claim(code, previousVisitor) {
+// Codes protected by a PIN also need the PIN; too many wrong PINs lock the code for a while.
+// Returns { visitor, code, count } or { error: "notfound" | "needpin" | "badpin" | "locked", minutes? }.
+function claim(code, pin, previousVisitor) {
   const wanted = String(code || "").trim().toLowerCase();
-  const row = db.prepare("SELECT id FROM visitors WHERE code = ?").get(wanted);
-  if (!row) return null;
+  const row = db.prepare("SELECT id, pin_hash, pin_salt, fails, locked_until FROM visitors WHERE code = ?").get(wanted);
+  if (!row) return { error: "notfound" };
+
+  const now = Date.now();
+  if (row.locked_until > now) return { error: "locked", minutes: Math.ceil((row.locked_until - now) / 60000) };
+  if (row.pin_hash) {
+    if (!pin) return { error: "needpin" };
+    if (!pinMatches(pin, row)) {
+      const fails = row.fails + 1;
+      if (fails >= MAX_PIN_FAILS) {
+        db.prepare("UPDATE visitors SET fails = 0, locked_until = ? WHERE id = ?").run(now + LOCK_MINUTES * 60000, row.id);
+        return { error: "locked", minutes: LOCK_MINUTES };
+      }
+      db.prepare("UPDATE visitors SET fails = ? WHERE id = ?").run(fails, row.id);
+      return { error: "badpin" };
+    }
+    db.prepare("UPDATE visitors SET fails = 0 WHERE id = ?").run(row.id);
+  }
+
   if (isVisitorId(previousVisitor) && previousVisitor !== row.id && countMemories(previousVisitor) === 0) {
     db.prepare("DELETE FROM visitors WHERE id = ? AND keep = 0").run(previousVisitor);
   }
   return { visitor: row.id, code: wanted, count: countMemories(row.id) };
 }
 
-// Visitors who never told her anything are tidied away once they've been gone a while.
-const EMPTY_VISITOR_DAYS = 7;
+// Once a week, visitors who never told her anything and haven't been back in a week are removed.
+const WEEK = 7 * 24 * 60 * 60 * 1000;
 function tidy() {
-  const cutoff = Date.now() - EMPTY_VISITOR_DAYS * 24 * 60 * 60 * 1000;
   const removed = db.prepare(`DELETE FROM visitors WHERE keep = 0 AND seen < ?
-    AND NOT EXISTS (SELECT 1 FROM memories WHERE memories.visitor = visitors.id)`).run(cutoff).changes;
+    AND NOT EXISTS (SELECT 1 FROM memories WHERE memories.visitor = visitors.id)`).run(Date.now() - WEEK).changes;
   if (removed) console.log(`Memory: tidied away ${removed} empty visitor${removed === 1 ? "" : "s"}.`);
 }
-tidy();
-setInterval(tidy, 6 * 60 * 60 * 1000).unref();
+function tidyIfDue() {
+  const last = Number(db.prepare("SELECT value FROM meta WHERE key = 'last_tidy'").get()?.value || 0);
+  if (Date.now() - last < WEEK) return;
+  tidy();
+  db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('last_tidy', ?)").run(String(Date.now()));
+}
+tidyIfDue();
+setInterval(tidyIfDue, 6 * 60 * 60 * 1000).unref(); // checks a few times a day, tidies weekly
 
 function list(visitor) {
   if (!isVisitorId(visitor)) return [];
