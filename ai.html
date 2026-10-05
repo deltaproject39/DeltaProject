@@ -117,8 +117,8 @@
       background: linear-gradient(135deg, var(--dawn-1), var(--dawn-2));
     }
     .tagline { margin: 2px 0 0; font-size: 0.82rem; color: var(--muted); }
+    .header-actions { margin-left: auto; display: flex; gap: 8px; }
     .icon-btn {
-      margin-left: auto;
       padding: 8px 10px;
       font-size: 1.2rem;
       line-height: 1;
@@ -215,6 +215,69 @@
       transition: width 0.3s linear;
     }
     .emotions .pct { text-align: right; font-variant-numeric: tabular-nums; }
+
+    /* Memory dialog */
+    .sheet {
+      width: min(440px, calc(100% - 32px));
+      max-height: calc(100dvh - 64px);
+      padding: 20px;
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      background: var(--bg);
+      color: var(--text);
+    }
+    .sheet::backdrop { background: rgba(0, 0, 0, 0.45); }
+    .sheet h2 { margin: 0 0 4px; font-size: 1.15rem; }
+    .sheet .sub { margin: 0 0 16px; color: var(--muted); font-size: 0.85rem; line-height: 1.45; }
+    .sheet h3 { margin: 18px 0 8px; font-size: 0.9rem; }
+    .code-row { display: flex; gap: 8px; align-items: center; }
+    .code-row code {
+      flex: 1;
+      padding: 8px 12px;
+      border-radius: 10px;
+      background: var(--bg-glow);
+      font-size: 1rem;
+      font-weight: 600;
+      user-select: all;
+    }
+    .sheet form { display: flex; gap: 8px; }
+    .sheet input { padding: 8px 12px; font-size: 0.95rem; }
+    .sheet button { padding: 8px 14px; font-size: 0.9rem; }
+    .sheet .plain {
+      color: var(--text);
+      background: transparent;
+      border: 1px solid var(--border);
+    }
+    .memory-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      max-height: 40vh;
+      overflow-y: auto;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+    .memory-list li {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      font-size: 0.9rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .memory-list li:last-child { border-bottom: none; }
+    .memory-list li span { flex: 1; }
+    .memory-list li.empty { color: var(--muted); font-style: italic; }
+    .memory-list li button {
+      padding: 2px 8px;
+      font-size: 0.8rem;
+      color: var(--muted);
+      background: transparent;
+      border: 1px solid var(--border);
+    }
+    .sheet-actions { display: flex; justify-content: space-between; gap: 8px; margin-top: 18px; }
+    .danger { background: var(--offline); }
+    #memory-status { min-height: 1.2em; margin: 10px 0 0; font-size: 0.85rem; color: var(--muted); }
 
     /* Sleepy "z"s floating up while Delta is offline */
     .zzz-layer { position: absolute; top: 16%; left: 62%; pointer-events: none; }
@@ -360,7 +423,10 @@
         <h1>Delta <span class="badge">AI</span></h1>
         <p class="tagline" id="status">Waking up...</p>
       </div>
-      <button type="button" class="icon-btn" id="voice-toggle">🔊</button>
+      <div class="header-actions">
+        <button type="button" class="icon-btn" id="memory-toggle" title="What Delta remembers" aria-label="What Delta remembers">🧠</button>
+        <button type="button" class="icon-btn" id="voice-toggle">🔊</button>
+      </div>
     </div>
   </header>
 
@@ -383,12 +449,40 @@
           <button id="send" disabled>Send</button>
         </form>
         <p class="fineprint">
-          Delta is an AI and can be wrong. Nothing you say is saved.
+          Delta is an AI and can be wrong. She remembers things you tell her about yourself (🧠 to see or erase them).
           Built on Gemma — <a href="https://ai.google.dev/gemma/terms" target="_blank" rel="noopener">Gemma Terms of Use</a>.
         </p>
       </footer>
     </div>
   </main>
+
+  <dialog class="sheet" id="memory-dialog" aria-labelledby="memory-title">
+    <h2 id="memory-title">🧠 What Delta remembers</h2>
+    <p class="sub">She jots down things you tell her about yourself, so she can remember you next time.
+      They're tied to this browser and stored only on Delta's home PC.</p>
+
+    <h3>Your memory code</h3>
+    <div class="code-row">
+      <code id="memory-code">—</code>
+      <button type="button" class="plain" id="memory-copy">Copy</button>
+    </div>
+    <p class="sub" style="margin-top:6px">Enter it on another device to bring your memories with you. Keep it private.</p>
+
+    <h3>On another device already?</h3>
+    <form id="memory-claim">
+      <input id="memory-claim-input" placeholder="e.g. sunny-otter-4821" autocomplete="off" required aria-label="Memory code">
+      <button>Use code</button>
+    </form>
+
+    <h3>Her notes about you</h3>
+    <ul class="memory-list" id="memory-list"></ul>
+
+    <p id="memory-status" role="status"></p>
+    <div class="sheet-actions">
+      <button type="button" class="danger" id="memory-forget-all">Forget me</button>
+      <button type="button" class="plain" id="memory-close">Close</button>
+    </div>
+  </dialog>
 
   <script type="importmap">
     {
@@ -975,7 +1069,10 @@
         const res = await fetch(config.deltaServer + "/health", { signal: AbortSignal.timeout(5000) });
         if (!res.ok) throw new Error();
         deltaServer = config.deltaServer;
-        ready("Online · curious about everything", "Hey. I'm Delta — I've only been around since September, so everything's still new. What's your name?");
+        const known = await memoryBook.hello();
+        ready("Online · curious about everything", known?.count
+          ? "Oh, hey, it's you again. What's new?"
+          : "Hey. I'm Delta — I've only been around since September, so everything's still new. What's your name?");
       } catch {
         statusEl.textContent = "Offline right now";
         dotEl.className = "dot offline";
@@ -1020,7 +1117,7 @@
       const res = await fetch(deltaServer + "/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: recentHistory() }),
+        body: JSON.stringify({ messages: recentHistory(), visitor: memoryBook.visitor }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -1083,6 +1180,130 @@
       // The bars follow her mood live: they jump when something moves her and drift as it fades.
       setInterval(() => render(mood.state), 150);
       render(mood.state);
+    })();
+
+    // ---- Memory: what Delta remembers about this visitor (kept on the owner's PC) ----
+    // The browser keeps a random visitor ID; the memory code lets people bring their
+    // memories to another device. Nothing here identifies who someone actually is.
+    const memoryBook = (() => {
+      const STORE = "delta-visitor";
+      const isId = (id) => /^[0-9a-f-]{36}$/.test(id || "");
+      let visitor = null;
+      try { visitor = localStorage.getItem(STORE); } catch {}
+      let code = null;
+
+      const dialog = document.getElementById("memory-dialog");
+      const codeEl = document.getElementById("memory-code");
+      const listEl = document.getElementById("memory-list");
+      const statusEl = document.getElementById("memory-status");
+      const claimInput = document.getElementById("memory-claim-input");
+
+      function useVisitor(id) {
+        visitor = id;
+        try { localStorage.setItem(STORE, id); } catch {}
+      }
+      if (!isId(visitor)) useVisitor(crypto.randomUUID());
+
+      async function call(action, extra = {}) {
+        if (!deltaServer) throw new Error("Delta is offline right now, so her memory is too.");
+        const res = await fetch(deltaServer + "/memory", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action, visitor, ...extra }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || "Something went wrong.");
+        return data;
+      }
+
+      // Registers this browser with Delta; returns { code, count } or null if she's offline.
+      async function hello() {
+        try {
+          const result = await call("hello");
+          code = result.code;
+          return result;
+        } catch {
+          return null;
+        }
+      }
+
+      async function refresh() {
+        codeEl.textContent = code || "—";
+        listEl.textContent = "";
+        try {
+          const { memories } = await call("list");
+          if (memories.length === 0) {
+            const empty = document.createElement("li");
+            empty.className = "empty";
+            empty.textContent = "Nothing yet. Tell her about yourself and she'll remember.";
+            listEl.append(empty);
+          }
+          for (const m of memories) {
+            const li = document.createElement("li");
+            const text = document.createElement("span");
+            text.textContent = m.text;
+            const remove = document.createElement("button");
+            remove.type = "button";
+            remove.textContent = "✕";
+            remove.title = "Forget this";
+            remove.setAttribute("aria-label", "Forget: " + m.text);
+            remove.addEventListener("click", async () => {
+              await call("forget", { id: m.id }).catch(() => {});
+              refresh();
+            });
+            li.append(text, remove);
+            listEl.append(li);
+          }
+        } catch (err) {
+          statusEl.textContent = err.message;
+        }
+      }
+
+      document.getElementById("memory-toggle").addEventListener("click", () => {
+        statusEl.textContent = "";
+        dialog.showModal();
+        refresh();
+      });
+      document.getElementById("memory-close").addEventListener("click", () => dialog.close());
+
+      document.getElementById("memory-copy").addEventListener("click", async () => {
+        if (!code) return;
+        try {
+          await navigator.clipboard.writeText(code);
+          statusEl.textContent = "Code copied.";
+        } catch {
+          statusEl.textContent = "Couldn't copy. Select the code and copy it by hand.";
+        }
+      });
+
+      document.getElementById("memory-claim").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        try {
+          const result = await call("claim", { code: claimInput.value });
+          useVisitor(result.visitor);
+          code = result.code;
+          claimInput.value = "";
+          statusEl.textContent = `Welcome back! She remembers ${result.count} thing${result.count === 1 ? "" : "s"} about you.`;
+          refresh();
+        } catch (err) {
+          statusEl.textContent = err.message;
+        }
+      });
+
+      document.getElementById("memory-forget-all").addEventListener("click", async () => {
+        if (!confirm("Make Delta forget everything about you? This can't be undone.")) return;
+        try {
+          await call("forgetEverything");
+          useVisitor(crypto.randomUUID()); // start over as someone new
+          await hello();
+          statusEl.textContent = "Done. She's forgotten everything about you.";
+          refresh();
+        } catch (err) {
+          statusEl.textContent = err.message;
+        }
+      });
+
+      return { hello, get visitor() { return visitor; } };
     })();
 
     // ---- Voice: Delta speaks her replies through the voice server on the owner's PC ----

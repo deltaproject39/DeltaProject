@@ -1,10 +1,11 @@
 // Gatekeeper: the only thing exposed to the internet through Cloudflare Tunnel.
 // It forwards chat requests to the local Ollama, but only for the Delta model,
-// and speech/emotion requests (text only) to Delta's voice server, with size limits
-// and per-visitor rate limits. Everything else is refused.
+// speech/emotion requests (text only) to Delta's voice server, and memory requests to
+// memory.js, with size limits and per-visitor rate limits. Everything else is refused.
 // Run: node server/gatekeeper.js
 
 const http = require("http");
+const memory = require("./memory");
 
 const PORT = 8787;
 const OLLAMA = "http://127.0.0.1:11434";
@@ -26,10 +27,14 @@ const MAX_TTS_CHARS = 600;          // about a sentence or two per request
 const TTS_RATE_LIMIT = 40;          // spoken chunks per minute, per visitor
 const MAX_TTS_CONCURRENT = 2;
 const EMOTION_RATE_LIMIT = 120;     // emotion reads per minute, per visitor (they're cheap)
+const MEMORY_RATE_LIMIT = 60;       // memory panel actions per minute, per visitor
+const CLAIM_RATE_LIMIT = 10;        // memory-code guesses per minute, per visitor
 
 const hits = new Map();
 const ttsHits = new Map();
 const emotionHits = new Map();
+const memoryHits = new Map();
+const claimHits = new Map();
 let active = 0;
 let ttsActive = 0;
 
@@ -63,6 +68,39 @@ function readBody(req, res, cors, onDone) {
     if (tooBig) return send(res, 413, { error: "That was too much to send at once. Try reloading the page." }, cors);
     onDone(body);
   });
+}
+
+function handleMemory(req, res, cors, body) {
+  let msg;
+  try {
+    msg = JSON.parse(body);
+  } catch {
+    return send(res, 400, { error: "Bad request" }, cors);
+  }
+  switch (msg.action) {
+    case "hello": {
+      const result = memory.hello(msg.visitor);
+      return result ? send(res, 200, result, cors) : send(res, 400, { error: "Bad request" }, cors);
+    }
+    case "claim": {
+      // Codes could only be found by guessing, so guesses are tightly limited.
+      if (rateLimited(claimHits, visitorId(req), CLAIM_RATE_LIMIT)) {
+        return send(res, 429, { error: "Too many tries. Wait a minute and try again." }, cors);
+      }
+      const result = memory.claim(msg.code);
+      return result ? send(res, 200, result, cors) : send(res, 404, { error: "No memories found for that code." }, cors);
+    }
+    case "list":
+      return send(res, 200, { memories: memory.list(msg.visitor) }, cors);
+    case "forget":
+      memory.forget(msg.visitor, msg.id);
+      return send(res, 200, { ok: true }, cors);
+    case "forgetEverything":
+      memory.forgetEverything(msg.visitor);
+      return send(res, 200, { ok: true }, cors);
+    default:
+      return send(res, 400, { error: "Bad request" }, cors);
+  }
 }
 
 async function readEmotion(res, cors, body) {
@@ -170,6 +208,13 @@ const server = http.createServer((req, res) => {
     return readBody(req, res, cors, (body) => readEmotion(res, cors, body));
   }
 
+  if (req.method === "POST" && req.url === "/memory") {
+    if (rateLimited(memoryHits, visitorId(req), MEMORY_RATE_LIMIT)) {
+      return send(res, 429, { error: "Slow down a bit and try again in a minute." }, cors);
+    }
+    return readBody(req, res, cors, (body) => handleMemory(req, res, cors, body));
+  }
+
   if (req.method !== "POST" || req.url !== "/chat") {
     return send(res, 404, { error: "Not found" }, cors);
   }
@@ -180,8 +225,11 @@ const server = http.createServer((req, res) => {
 
   readBody(req, res, cors, async (body) => {
     let messages;
+    let visitor = null;
     try {
-      messages = cleanMessages(JSON.parse(body).messages);
+      const parsed = JSON.parse(body);
+      messages = cleanMessages(parsed.messages);
+      visitor = parsed.visitor;
     } catch {
       messages = null;
     }
@@ -195,13 +243,26 @@ const server = http.createServer((req, res) => {
     const abort = new AbortController();
     res.on("close", () => abort.abort());
 
+    // Recall what she knows about this visitor and slip it in just before their latest message
+    // (placed there, rather than first, so Delta's own personality prompt still applies).
+    const lastUser = [...messages].reverse().find((m) => m.role === "user")?.content || "";
+    let recalled = [];
+    try {
+      recalled = await memory.recall(visitor, lastUser);
+    } catch (err) {
+      console.error("Memory:", err.message);
+    }
+    const prompt = recalled.length
+      ? [...messages.slice(0, -1), { role: "system", content: memory.note(recalled) }, messages[messages.length - 1]]
+      : messages;
+
     try {
       const upstream = await fetch(`${OLLAMA}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model: MODEL,
-          messages,
+          messages: prompt,
           stream: true,
           options: { num_predict: MAX_REPLY_TOKENS },
         }),
@@ -209,10 +270,12 @@ const server = http.createServer((req, res) => {
       });
       if (!upstream.ok) throw new Error(`Ollama returned ${upstream.status}`);
 
-      // Pass Ollama's stream (one JSON object per line) straight through.
+      // Pass Ollama's stream (one JSON object per line) straight through, then let her take
+      // notes on what the visitor said.
       res.writeHead(200, { ...cors, "Content-Type": "application/x-ndjson" });
       for await (const chunk of upstream.body) res.write(chunk);
       res.end();
+      memory.learn(visitor, lastUser);
     } catch (err) {
       if (!res.headersSent) send(res, 502, { error: "Delta is offline right now." }, cors);
       else res.end();
