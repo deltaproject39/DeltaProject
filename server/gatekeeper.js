@@ -87,7 +87,7 @@ function handleMemory(req, res, cors, body) {
       if (rateLimited(claimHits, visitorId(req), CLAIM_RATE_LIMIT)) {
         return send(res, 429, { error: "Too many tries. Wait a minute and try again." }, cors);
       }
-      const result = memory.claim(msg.code);
+      const result = memory.claim(msg.code, msg.visitor);
       return result ? send(res, 200, result, cors) : send(res, 404, { error: "No memories found for that code." }, cors);
     }
     case "list":

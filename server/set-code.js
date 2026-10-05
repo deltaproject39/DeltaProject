@@ -17,6 +17,9 @@ if (!/^[a-z0-9][a-z0-9-]{2,39}$/.test(wanted)) {
 }
 
 const db = new DatabaseSync(path.join(__dirname, "memory.db"));
+if (!db.prepare("PRAGMA table_info(visitors)").all().some((c) => c.name === "keep")) {
+  db.exec("ALTER TABLE visitors ADD COLUMN keep INTEGER NOT NULL DEFAULT 0");
+}
 const visitor = db.prepare("SELECT id FROM visitors WHERE code = ?").get(current);
 if (!visitor) {
   console.log(`No visitor has the code "${current}".`);
@@ -26,5 +29,6 @@ if (db.prepare("SELECT 1 FROM visitors WHERE code = ?").get(wanted)) {
   console.log(`The code "${wanted}" is already taken.`);
   process.exit(1);
 }
-db.prepare("UPDATE visitors SET code = ? WHERE id = ?").run(wanted, visitor.id);
+// Custom IDs are kept even while they have no memories yet.
+db.prepare("UPDATE visitors SET code = ?, keep = 1 WHERE id = ?").run(wanted, visitor.id);
 console.log(`Done: "${current}" is now "${wanted}". Reload the page to see it in the memory panel.`);

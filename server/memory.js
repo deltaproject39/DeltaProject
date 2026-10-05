@@ -49,6 +49,10 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS memories_by_visitor ON memories(visitor);
 `);
+// "keep" marks visitors that are never tidied away, e.g. custom IDs set with set-code.js.
+if (!db.prepare("PRAGMA table_info(visitors)").all().some((c) => c.name === "keep")) {
+  db.exec("ALTER TABLE visitors ADD COLUMN keep INTEGER NOT NULL DEFAULT 0");
+}
 
 const isVisitorId = (id) => typeof id === "string" && /^[0-9a-f-]{36}$/.test(id);
 const pick = (list) => list[crypto.randomInt(list.length)];
@@ -80,11 +84,29 @@ function hello(visitor) {
   return { code: row.code, count: countMemories(visitor) };
 }
 
-// A memory code typed on another device gives back that visitor's ID.
-function claim(code) {
-  const row = db.prepare("SELECT id FROM visitors WHERE code = ?").get(String(code || "").trim().toLowerCase());
-  return row ? { visitor: row.id, code: String(code).trim().toLowerCase(), count: countMemories(row.id) } : null;
+// A memory code typed on another device gives back that visitor's ID. The device's own ID is
+// usually brand new and empty, so it's dropped rather than left behind; one that already has
+// memories is kept.
+function claim(code, previousVisitor) {
+  const wanted = String(code || "").trim().toLowerCase();
+  const row = db.prepare("SELECT id FROM visitors WHERE code = ?").get(wanted);
+  if (!row) return null;
+  if (isVisitorId(previousVisitor) && previousVisitor !== row.id && countMemories(previousVisitor) === 0) {
+    db.prepare("DELETE FROM visitors WHERE id = ? AND keep = 0").run(previousVisitor);
+  }
+  return { visitor: row.id, code: wanted, count: countMemories(row.id) };
 }
+
+// Visitors who never told her anything are tidied away once they've been gone a while.
+const EMPTY_VISITOR_DAYS = 7;
+function tidy() {
+  const cutoff = Date.now() - EMPTY_VISITOR_DAYS * 24 * 60 * 60 * 1000;
+  const removed = db.prepare(`DELETE FROM visitors WHERE keep = 0 AND seen < ?
+    AND NOT EXISTS (SELECT 1 FROM memories WHERE memories.visitor = visitors.id)`).run(cutoff).changes;
+  if (removed) console.log(`Memory: tidied away ${removed} empty visitor${removed === 1 ? "" : "s"}.`);
+}
+tidy();
+setInterval(tidy, 6 * 60 * 60 * 1000).unref();
 
 function list(visitor) {
   if (!isVisitorId(visitor)) return [];
