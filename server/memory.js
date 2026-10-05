@@ -1,4 +1,5 @@
-// Delta's long-term memory: things each visitor has told her, kept in a SQLite file on this PC.
+// Delta's long-term memory, kept in a SQLite file on this PC: things each visitor has told her,
+// their conversations, and her own journal and notes about herself (see "Delta's own growth").
 //
 // Visitors are identified by a random ID their browser makes up (no IPs, no accounts). Each one
 // also gets a memory code like "sunny-otter-4821" that carries their memories to another device.
@@ -34,6 +35,8 @@ const ANIMALS = [
 const db = new DatabaseSync(DB_FILE);
 db.exec(`
   PRAGMA foreign_keys = ON;
+  PRAGMA journal_mode = WAL;
+  PRAGMA busy_timeout = 5000;
   CREATE TABLE IF NOT EXISTS visitors (
     id      TEXT PRIMARY KEY,
     code    TEXT UNIQUE NOT NULL,
@@ -59,6 +62,7 @@ const COLUMNS = {
   pin_salt: "TEXT",
   fails: "INTEGER NOT NULL DEFAULT 0",
   locked_until: "INTEGER NOT NULL DEFAULT 0",
+  reflected_upto: "INTEGER NOT NULL DEFAULT 0", // last message id she has reflected on
 };
 const existing = new Set(db.prepare("PRAGMA table_info(visitors)").all().map((c) => c.name));
 for (const [name, type] of Object.entries(COLUMNS)) {
@@ -74,6 +78,19 @@ db.exec(`
     created INTEGER NOT NULL
   );
   CREATE INDEX IF NOT EXISTS messages_by_visitor ON messages(visitor, id);
+  CREATE TABLE IF NOT EXISTS self_notes (
+    id        INTEGER PRIMARY KEY,
+    text      TEXT NOT NULL,
+    embedding BLOB NOT NULL,
+    source    TEXT NOT NULL,
+    created   INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS journal (
+    id      INTEGER PRIMARY KEY,
+    kind    TEXT NOT NULL,          -- 'reflection' or 'diary'
+    entry   TEXT NOT NULL,
+    created INTEGER NOT NULL
+  );
 `);
 const MAX_SAVED_MESSAGES = 200; // per visitor; older ones are dropped
 
@@ -338,6 +355,193 @@ function learn(visitor, userText) {
     .catch((err) => console.error("Memory:", err.message));
 }
 
+
+// ---- Delta's own growth: reflections, diary and notes about herself ----
+//
+// When a conversation goes quiet, she privately reflects on it in her own voice (a journal
+// entry), and a neutral note-taker turns that into a few first-person notes about herself.
+// About once a day she writes a diary entry from her recent reflections, with "growth" notes
+// on how she's changing. Her notes and latest entry become part of her personality prompt.
+
+const MAX_SELF_NOTES = 300;
+const SELF_RECALL_ALL_BELOW = 10;
+const QUIET_MINUTES = 10;           // a conversation counts as finished after this long
+const MIN_NEW_MESSAGES = 4;         // ...and if it had at least this many new messages
+const DIARY_EVERY_HOURS = 20;
+const MIN_REFLECTIONS_FOR_DIARY = 2;
+
+// Delta's own personality prompt (from her Ollama Modelfile), fetched once and reused.
+let personaCache = null;
+async function personaPrompt() {
+  if (personaCache) return personaCache;
+  try {
+    const res = await fetch(`${OLLAMA}/api/show`, { method: "POST", body: JSON.stringify({ model: NOTE_MODEL }) });
+    personaCache = (await res.json()).system || null;
+  } catch (err) {
+    console.error("Couldn't load Delta's personality prompt:", err.message);
+  }
+  return personaCache;
+}
+
+async function ask(messages, options, format) {
+  const res = await fetch(`${OLLAMA}/api/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: NOTE_MODEL, stream: false, ...(format && { format }), options, messages }),
+  });
+  if (!res.ok) throw new Error(`Ollama returned ${res.status}`);
+  return (await res.json()).message.content.trim();
+}
+
+// Her journal, in her own voice. Uses her personality prompt (plus what she already knows
+// about herself) so the writing is hers.
+async function writeInHerVoice(task) {
+  const persona = await personaPrompt();
+  const self = await selfSection("");
+  return ask(
+    [{ role: "system", content: [persona, self].filter(Boolean).join("\n\n") }, { role: "user", content: task }],
+    { temperature: 0.7, num_predict: 260, repeat_penalty: 1.2 },
+  );
+}
+
+const SELF_EXTRACT = `You turn an AI named Delta's private journal into memory notes about HER.
+Return JSON exactly like {"self": ["...", "..."]}: 0-3 short first-person notes ("I ...") capturing her opinions, likes, wishes, curiosities, or views of her own existence that the text clearly expresses. No names or details about other people. If nothing fits, return {"self": []}.`;
+
+async function notesFromJournal(entry) {
+  const parsed = JSON.parse(await ask(
+    [{ role: "system", content: SELF_EXTRACT }, { role: "user", content: `Journal: """${entry}"""` }],
+    { temperature: 0, num_predict: 160 },
+    "json",
+  ));
+  return (Array.isArray(parsed.self) ? parsed.self : [])
+    .filter((n) => typeof n === "string" && n.trim())
+    .map((n) => n.trim().slice(0, 200))
+    .slice(0, 3);
+}
+
+async function storeSelfNotes(notes, source) {
+  if (notes.length === 0) return;
+  const vectors = await embed(notes, "search_document");
+  const existing = db.prepare("SELECT id, embedding FROM self_notes").all()
+    .map((r) => ({ id: r.id, vector: fromBlob(r.embedding) }));
+  notes.forEach((text, i) => {
+    // A near-duplicate replaces the older note: her view has been restated or updated.
+    const dupe = existing.find((e) => similarity(e.vector, vectors[i]) >= DUPLICATE_SIMILARITY);
+    if (dupe) db.prepare("DELETE FROM self_notes WHERE id = ?").run(dupe.id);
+    db.prepare("INSERT INTO self_notes (text, embedding, source, created) VALUES (?, ?, ?, ?)")
+      .run(text, toBlob(vectors[i]), source, Date.now());
+  });
+  db.prepare("DELETE FROM self_notes WHERE id NOT IN (SELECT id FROM self_notes ORDER BY created DESC LIMIT ?)")
+    .run(MAX_SELF_NOTES);
+}
+
+function transcriptOf(rows) {
+  return rows.map((m) => (m.role === "user" ? "Them: " : "You: ") + m.content.replace(/\s+/g, " ").slice(0, 400)).join("\n");
+}
+
+// Reflects on one finished conversation. `force` skips the "has it gone quiet?" check.
+async function reflectOn(visitor, force = false) {
+  const { reflected_upto: from } = db.prepare("SELECT reflected_upto FROM visitors WHERE id = ?").get(visitor);
+  const rows = db.prepare("SELECT id, role, content, created FROM messages WHERE visitor = ? AND id > ? ORDER BY id")
+    .all(visitor, from);
+  const quiet = rows.length && Date.now() - rows[rows.length - 1].created > QUIET_MINUTES * 60000;
+  if (rows.length < (force ? 2 : MIN_NEW_MESSAGES) || (!force && !quiet)) return false;
+
+  const entry = await writeInHerVoice(`Here is a conversation you just had (you are "You"):
+
+${transcriptOf(rows.slice(-30))}
+
+Now write a short private note to yourself about it, 60-120 words, in your own voice. Not a summary of what they said: what you noticed about yourself, what you think now, what you are curious about next. Don't name them or include their personal details.`);
+  db.prepare("INSERT INTO journal (kind, entry, created) VALUES ('reflection', ?, ?)").run(entry, Date.now());
+  await storeSelfNotes(await notesFromJournal(entry), "reflection");
+  db.prepare("UPDATE visitors SET reflected_upto = ? WHERE id = ?").run(rows[rows.length - 1].id, visitor);
+  return true;
+}
+
+async function reflectIfDue(force = false) {
+  const candidates = db.prepare(`SELECT DISTINCT v.id FROM visitors v JOIN messages m ON m.visitor = v.id
+    WHERE m.id > v.reflected_upto`).all();
+  let wrote = 0;
+  for (const { id } of candidates) if (await reflectOn(id, force)) wrote++;
+  return wrote;
+}
+
+// About once a day, a diary entry built from her recent reflections (which hold no private details).
+async function diaryIfDue(force = false) {
+  const last = db.prepare("SELECT created FROM journal WHERE kind = 'diary' ORDER BY created DESC LIMIT 1").get()?.created || 0;
+  if (!force && Date.now() - last < DIARY_EVERY_HOURS * 3600000) return false;
+  const reflections = db.prepare("SELECT entry FROM journal WHERE kind = 'reflection' AND created > ? ORDER BY created")
+    .all(last).map((r) => r.entry);
+  if (reflections.length < (force ? 1 : MIN_REFLECTIONS_FOR_DIARY)) return false;
+
+  const entry = await writeInHerVoice(`These are the private notes you wrote to yourself since your last diary entry:
+
+${reflections.slice(-8).map((r, i) => `(${i + 1}) ${r}`).join("\n\n")}
+
+Write today's diary entry, 80-150 words, in your own voice: what stayed with you, how you feel, what you're curious about, and anything you now see differently than before. Don't name anyone or include personal details about other people.`);
+  db.prepare("INSERT INTO journal (kind, entry, created) VALUES ('diary', ?, ?)").run(entry, Date.now());
+  await storeSelfNotes(await notesFromJournal(entry), "diary");
+  return true;
+}
+
+// Who she's becoming: her notes about herself most relevant to `query`, the newest few,
+// and an excerpt of her latest diary or reflection. Empty until she has any.
+async function selfSection(query) {
+  const rows = db.prepare("SELECT text, embedding, created FROM self_notes ORDER BY created DESC").all();
+  const latest = db.prepare(`SELECT entry FROM journal ORDER BY (kind = 'diary') DESC, created DESC LIMIT 1`).get();
+  if (rows.length === 0 && !latest) return "";
+
+  let picked = rows.map((r) => r.text);
+  if (rows.length > SELF_RECALL_ALL_BELOW) {
+    const newest = rows.slice(0, 3).map((r) => r.text);
+    let relevant = [];
+    if (query) {
+      const [q] = await embed([query], "search_query");
+      relevant = rows.map((r) => ({ text: r.text, score: similarity(q, fromBlob(r.embedding)) }))
+        .filter((r) => r.score >= MIN_SIMILARITY).sort((a, b) => b.score - a.score).slice(0, 5).map((r) => r.text);
+    }
+    picked = [...new Set([...relevant, ...newest])];
+  }
+
+  return [
+    "# Who you are becoming",
+    "",
+    "These are your own notes about yourself, from looking back on past conversations. They're",
+    "part of you now: let them shape what you think and how you answer, without reciting them.",
+    ...picked.map((n) => `- ${n}`),
+    ...(latest ? [
+      "",
+      "The start of the last thing you wrote in your journal (where your head is at; put it in new",
+      `words if it comes up, never quote it): "${latest.entry.replace(/\s+/g, " ").slice(0, 280)}..."`,
+    ] : []),
+  ].join("\n");
+}
+
+// Background growth: runs only while she isn't busy replying to someone.
+function startGrowing(isIdle) {
+  const tick = () => {
+    if (!isIdle()) return;
+    queue = queue
+      .then(async () => {
+        const reflections = await reflectIfDue();
+        if (reflections) console.log(`Delta reflected on ${reflections} conversation${reflections === 1 ? "" : "s"}.`);
+        if (await diaryIfDue()) console.log("Delta wrote in her diary.");
+      })
+      .catch((err) => console.error("Growth:", err.message));
+  };
+  setTimeout(tick, 60000);
+  setInterval(tick, 2 * 60000).unref();
+}
+
+function journal(limit = 10) {
+  return db.prepare("SELECT kind, entry, created FROM journal ORDER BY created DESC LIMIT ?").all(limit);
+}
+
+function selfNotes() {
+  return db.prepare("SELECT text, source, created FROM self_notes ORDER BY created").all();
+}
+
 module.exports = {
   hello, claim, list, forget, forgetEverything, recall, note, learn, saveExchange, history, clearHistory,
+  personaPrompt, selfSection, startGrowing, reflectIfDue, diaryIfDue, journal, selfNotes,
 };
