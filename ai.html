@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Delta</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%23ffb547'/%3E%3Cstop offset='1' stop-color='%23f2613a'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='40' height='40' rx='12' fill='url(%23g)'/%3E%3Cpath d='M20 10 L30 28 H10 Z' fill='none' stroke='white' stroke-width='3' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1 1'%3E%3Ccircle cx='.5' cy='.5' r='.5' fill='%23f2613a'/%3E%3C/svg%3E">
   <style>
     /* Delta's palette: "dawn" — night ink with a sunrise accent. */
     :root {
@@ -77,8 +77,11 @@
       height: 44px;
       position: relative;
     }
-    .avatar svg { width: 100%; height: 100%; display: block; }
     .avatar .face {
+      width: 100%;
+      height: 100%;
+      display: block;
+      object-fit: cover;
       border-radius: 50%;
       background: linear-gradient(135deg, var(--dawn-1), var(--dawn-2));
     }
@@ -129,21 +132,33 @@
       .app { grid-template-columns: 340px 1fr; grid-template-rows: 1fr; }
     }
 
-    /* Character stage */
+    /* Character stage: Delta's 3D model renders into the canvas. */
     .stage {
       display: flex;
       flex-direction: column;
       align-items: center;
-      justify-content: center;
-      padding: 8px 16px 4px;
+      padding: 0 16px 4px;
       border-bottom: 1px solid var(--border);
     }
     @media (min-width: 900px) {
-      .stage { border-bottom: none; border-right: 1px solid var(--border); padding: 24px; }
+      .stage { border-bottom: none; border-right: 1px solid var(--border); padding: 0 0 16px; }
     }
-    #character { width: 140px; height: auto; overflow: visible; }
+    .viewport {
+      position: relative;
+      width: 100%;
+      height: 220px;
+    }
     @media (min-width: 900px) {
-      #character { width: 270px; }
+      .viewport { flex: 1; height: auto; min-height: 0; }
+    }
+    #character-canvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+      -webkit-mask-image: linear-gradient(to bottom, #000 80%, transparent);
+      mask-image: linear-gradient(to bottom, #000 80%, transparent);
     }
     .mood {
       margin: 4px 0 0;
@@ -153,31 +168,22 @@
       font-style: italic;
     }
 
-    /* Character. Most motion is driven by the animation loop in the script;
-       only the sleepy "z"s and the hair-clip twinkle are plain CSS. */
-    #character .spark {
-      transform-box: fill-box;
-      transform-origin: center;
-      animation: twinkle 2.8s ease-in-out infinite;
-    }
-    #character[data-state="thinking"] .spark { animation-duration: 0.9s; }
-    #character[data-state="sleeping"] .spark { opacity: 0.4; }
-    #character .zzz { opacity: 0; transform-box: fill-box; transform-origin: center; }
-    #character[data-state="sleeping"] .zzz { animation: zzz 3s ease-in-out infinite; }
-    #character[data-state="sleeping"] .zzz:nth-of-type(2) { animation-delay: 1s; }
-    #character[data-state="sleeping"] .zzz:nth-of-type(3) { animation-delay: 2s; }
-
-    @keyframes twinkle {
-      0%, 100% { transform: scale(1) rotate(0deg); opacity: 0.85; }
-      50% { transform: scale(1.25) rotate(20deg); opacity: 1; }
-    }
+    /* Sleepy "z"s floating up while Delta is offline */
+    .zzz-layer { position: absolute; top: 16%; left: 62%; pointer-events: none; }
+    .zzz-layer span { position: absolute; opacity: 0; color: var(--dawn-1); font-weight: 700; }
+    .zzz-layer span:nth-child(1) { font-size: 1.3rem; }
+    .zzz-layer span:nth-child(2) { font-size: 1rem; left: 14px; top: -12px; }
+    .zzz-layer span:nth-child(3) { font-size: 0.8rem; left: 26px; top: -22px; }
+    .stage[data-state="sleeping"] .zzz-layer span { animation: zzz 3s ease-in-out infinite; }
+    .stage[data-state="sleeping"] .zzz-layer span:nth-child(2) { animation-delay: 1s; }
+    .stage[data-state="sleeping"] .zzz-layer span:nth-child(3) { animation-delay: 2s; }
     @keyframes zzz {
       0% { opacity: 0; transform: translate(0, 0) scale(0.6); }
       30% { opacity: 1; }
       100% { opacity: 0; transform: translate(14px, -26px) scale(1.1); }
     }
     @media (prefers-reduced-motion: reduce) {
-      #character * { animation: none !important; }
+      .zzz-layer span { animation: none !important; }
     }
 
     /* Conversation */
@@ -310,168 +316,12 @@
   </header>
 
   <main class="app">
-    <section class="stage" aria-label="Delta's character">
-      <!-- Delta, drawn in layers like a Live2D model. The script moves each layer by a
-           different amount (parallax), swings the hair with spring physics, blinks and talks. -->
-      <svg id="character" viewBox="0 0 200 230" data-state="sleeping" role="img" aria-label="Delta">
-        <defs>
-          <linearGradient id="hair-grad" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0" stop-color="#7a2a2a"/>
-            <stop offset="0.45" stop-color="#cf4a2c"/>
-            <stop offset="1" stop-color="#ffa44a"/>
-          </linearGradient>
-          <linearGradient id="hair-back-grad" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0" stop-color="#5a1f24"/>
-            <stop offset="0.5" stop-color="#a83a26"/>
-            <stop offset="1" stop-color="#e8823a"/>
-          </linearGradient>
-          <radialGradient id="skin-grad" cx="0.5" cy="0.42" r="0.62">
-            <stop offset="0" stop-color="#fff3ea"/>
-            <stop offset="0.75" stop-color="#ffe2d2"/>
-            <stop offset="1" stop-color="#f7c9b4"/>
-          </radialGradient>
-          <linearGradient id="iris-grad" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0" stop-color="#4a1610"/>
-            <stop offset="0.45" stop-color="#a8401f"/>
-            <stop offset="1" stop-color="#ffbe62"/>
-          </linearGradient>
-          <linearGradient id="sclera-grad" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0" stop-color="#e9d9e6"/>
-            <stop offset="0.35" stop-color="#ffffff"/>
-          </linearGradient>
-          <radialGradient id="blush-grad">
-            <stop offset="0" stop-color="#ff6f86" stop-opacity="0.55"/>
-            <stop offset="1" stop-color="#ff6f86" stop-opacity="0"/>
-          </radialGradient>
-          <linearGradient id="top-grad" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0" stop-color="#3a3556"/>
-            <stop offset="1" stop-color="#211e33"/>
-          </linearGradient>
-          <linearGradient id="fade-grad" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0.8" stop-color="#fff"/>
-            <stop offset="1" stop-color="#000"/>
-          </linearGradient>
-          <mask id="fade-bottom"><rect width="200" height="230" fill="url(#fade-grad)"/></mask>
-          <clipPath id="clip-eye-l"><ellipse cx="84" cy="112" rx="9.5" ry="11"/></clipPath>
-          <clipPath id="clip-eye-r"><ellipse cx="116" cy="112" rx="9.5" ry="11"/></clipPath>
-          <clipPath id="clip-face"><path d="M63 98 C63 68 80 56 100 56 C120 56 137 68 137 98 C137 122 128 140 112 152 Q100 160 88 152 C72 140 63 122 63 98 Z"/></clipPath>
-        </defs>
-
-        <text class="zzz" x="140" y="62" font-size="16" font-weight="700" fill="#ffb547">z</text>
-        <text class="zzz" x="150" y="50" font-size="13" font-weight="700" fill="#ffb547">z</text>
-        <text class="zzz" x="158" y="40" font-size="10" font-weight="700" fill="#ffb547">z</text>
-
-        <g mask="url(#fade-bottom)">
-        <g id="c-body">
-          <!-- Back hair -->
-          <g id="c-hair-back">
-            <path d="M100 36 C52 36 38 72 40 112 C42 150 38 182 30 212 L44 202 L52 218 L64 200 L76 214 L84 196 L116 196 L124 214 L136 200 L148 218 L156 202 L170 212 C162 182 158 150 160 112 C162 72 148 36 100 36 Z" fill="url(#hair-back-grad)" stroke="#5a1f24" stroke-width="0.8"/>
-            <path d="M52 120 Q50 160 44 196 M148 120 Q150 160 156 196 M60 150 Q58 180 54 206 M140 150 Q142 180 146 206" fill="none" stroke="#5a1f24" stroke-width="1" opacity="0.45"/>
-          </g>
-
-          <!-- Neck and outfit -->
-          <path d="M90 138 L90 178 Q100 185 110 178 L110 138 Z" fill="#f8cfbb"/>
-          <path d="M90 146 Q100 164 110 146 L110 160 Q100 170 90 160 Z" fill="#e3a28c" opacity="0.55"/>
-          <path d="M30 230 C32 200 58 184 90 178 Q100 186 110 178 C142 184 168 200 170 230 Z" fill="url(#top-grad)"/>
-          <path d="M84 179 L100 200 L116 179" fill="none" stroke="#f2613a" stroke-width="2.6" stroke-linejoin="round"/>
-          <path d="M80 181 L100 206 L120 181" fill="none" stroke="#ffb547" stroke-width="1" opacity="0.7"/>
-          <path d="M100 205 l2 4.5 l4.5 2 l-4.5 2 l-2 4.5 l-2 -4.5 l-4.5 -2 l4.5 -2 Z" fill="#ffd166"/>
-
-          <g id="c-head">
-            <!-- Face -->
-            <path d="M63 98 C63 68 80 56 100 56 C120 56 137 68 137 98 C137 122 128 140 112 152 Q100 160 88 152 C72 140 63 122 63 98 Z" fill="url(#skin-grad)" stroke="#d08a72" stroke-width="0.9"/>
-
-            <g id="c-face">
-              <ellipse cx="74" cy="128" rx="10" ry="5.5" fill="url(#blush-grad)"/>
-              <ellipse cx="126" cy="128" rx="10" ry="5.5" fill="url(#blush-grad)"/>
-              <path d="M70 129 l2 -3.5 M74 129 l2 -3.5 M78 129 l2 -3.5 M120 129 l2 -3.5 M124 129 l2 -3.5 M128 129 l2 -3.5" stroke="#ff7a8a" stroke-width="0.8" stroke-linecap="round" opacity="0.6"/>
-
-              <path d="M75 95 Q83 91 91 93" fill="none" stroke="#8a3a2c" stroke-width="1.5" stroke-linecap="round"/>
-              <path d="M109 93 Q117 91 125 95" fill="none" stroke="#8a3a2c" stroke-width="1.5" stroke-linecap="round"/>
-
-              <g id="c-eye-l" class="eye" data-cy="112" transform="matrix(1.12 0 0 1.12 -10.08 -13.44)">
-                <g class="eye-open">
-                  <ellipse cx="84" cy="112" rx="9.5" ry="11" fill="url(#sclera-grad)"/>
-                  <g clip-path="url(#clip-eye-l)">
-                    <g class="pupil">
-                      <ellipse cx="84" cy="113.5" rx="7" ry="9" fill="url(#iris-grad)" stroke="#3a120c" stroke-width="0.8"/>
-                      <ellipse cx="84" cy="114" rx="3.2" ry="4.6" fill="#1c0907"/>
-                      <path d="M79 118.5 Q84 122.5 89 118.5" fill="none" stroke="#ffe0a8" stroke-width="1.3" opacity="0.85"/>
-                      <ellipse cx="86.8" cy="108.6" rx="2.7" ry="3.3" fill="#fff"/>
-                      <circle cx="81" cy="117" r="1.2" fill="#fff" opacity="0.9"/>
-                    </g>
-                    <ellipse cx="84" cy="101.5" rx="11" ry="4" fill="#5a2a3a" opacity="0.18"/>
-                  </g>
-                  <path d="M73 107 Q84 97 96 104 L95.4 106.2 Q84 100.6 74.6 108.6 Z" fill="#2a1414"/>
-                  <path d="M73.5 107.3 L68.8 104.2 L74.6 105.4 Z" fill="#2a1414"/>
-                  <path d="M78.5 121.6 Q84 123.6 89.5 121.6" fill="none" stroke="#9a5444" stroke-width="0.8" opacity="0.7"/>
-                  <path d="M75 103 Q84 96 94 100" fill="none" stroke="#c97b63" stroke-width="0.8" opacity="0.6"/>
-                </g>
-                <path class="eye-closed" d="M75 112 Q84 117.5 94 112" fill="none" stroke="#2a1414" stroke-width="2" stroke-linecap="round" opacity="0"/>
-              </g>
-
-              <g id="c-eye-r" class="eye" data-cy="112" transform="matrix(1.12 0 0 1.12 -13.92 -13.44)">
-                <g class="eye-open">
-                  <ellipse cx="116" cy="112" rx="9.5" ry="11" fill="url(#sclera-grad)"/>
-                  <g clip-path="url(#clip-eye-r)">
-                    <g class="pupil">
-                      <ellipse cx="116" cy="113.5" rx="7" ry="9" fill="url(#iris-grad)" stroke="#3a120c" stroke-width="0.8"/>
-                      <ellipse cx="116" cy="114" rx="3.2" ry="4.6" fill="#1c0907"/>
-                      <path d="M111 118.5 Q116 122.5 121 118.5" fill="none" stroke="#ffe0a8" stroke-width="1.3" opacity="0.85"/>
-                      <ellipse cx="118.8" cy="108.6" rx="2.7" ry="3.3" fill="#fff"/>
-                      <circle cx="113" cy="117" r="1.2" fill="#fff" opacity="0.9"/>
-                    </g>
-                    <ellipse cx="116" cy="101.5" rx="11" ry="4" fill="#5a2a3a" opacity="0.18"/>
-                  </g>
-                  <path d="M127 107 Q116 97 104 104 L104.6 106.2 Q116 100.6 125.4 108.6 Z" fill="#2a1414"/>
-                  <path d="M126.5 107.3 L131.2 104.2 L125.4 105.4 Z" fill="#2a1414"/>
-                  <path d="M110.5 121.6 Q116 123.6 121.5 121.6" fill="none" stroke="#9a5444" stroke-width="0.8" opacity="0.7"/>
-                  <path d="M125 103 Q116 96 106 100" fill="none" stroke="#c97b63" stroke-width="0.8" opacity="0.6"/>
-                </g>
-                <path class="eye-closed" d="M106 112 Q116 117.5 125 112" fill="none" stroke="#2a1414" stroke-width="2" stroke-linecap="round" opacity="0"/>
-              </g>
-
-              <path d="M100.5 123 Q99.5 126 101.5 126.5" fill="none" stroke="#d58b74" stroke-width="1" stroke-linecap="round"/>
-
-              <path id="c-smile" d="M95 136 Q100 139.5 105 136" fill="none" stroke="#b5474a" stroke-width="1.6" stroke-linecap="round"/>
-              <g id="c-mouth-open" class="mouth-open" transform="matrix(1 0 0 0 0 135.5)">
-                <path d="M95.5 135.5 Q100 134.5 104.5 135.5 Q104 141.5 100 142 Q96 141.5 95.5 135.5 Z" fill="#7a2630" stroke="#5a1a22" stroke-width="0.6"/>
-                <ellipse cx="100" cy="140.2" rx="2.6" ry="1.3" fill="#e66a6f"/>
-              </g>
-            </g>
-
-            <!-- Side locks (swing with physics) -->
-            <g id="c-lock-l">
-              <path d="M66 84 C58 112 62 146 54 178 Q60 174 63 168 Q66 176 70 172 C72 146 74 116 72 92 Z" fill="url(#hair-grad)" stroke="#6b2424" stroke-width="0.7"/>
-              <path d="M67 100 Q64 140 60 168" fill="none" stroke="#7a2a2a" stroke-width="0.8" opacity="0.5"/>
-            </g>
-            <g id="c-lock-r">
-              <path d="M134 84 C142 112 138 146 146 178 Q140 174 137 168 Q134 176 130 172 C128 146 126 116 128 92 Z" fill="url(#hair-grad)" stroke="#6b2424" stroke-width="0.7"/>
-              <path d="M133 100 Q136 140 140 168" fill="none" stroke="#7a2a2a" stroke-width="0.8" opacity="0.5"/>
-            </g>
-
-            <!-- Bangs, with the soft shadow they cast on the forehead -->
-            <g id="c-bangs">
-              <g clip-path="url(#clip-face)">
-                <path transform="translate(0 4)" d="M57 104 C53 60 76 40 100 40 C125 40 148 60 143 104 C140 94 137 86 133 80 C132 88 130 94 126 100 C124 90 121 82 118 76 C117 86 115 92 111 97 C109 88 106 80 103 75 C102 84 101 90 98 95 C96 86 93 80 90 76 C89 84 87 90 84 96 C82 88 79 83 76 80 C75 88 73 94 70 98 C68 92 66 88 64 86 C62 92 60 98 57 104 Z" fill="#e39a84" opacity="0.5"/>
-              </g>
-              <path d="M57 104 C53 60 76 40 100 40 C125 40 148 60 143 104 C140 94 137 86 133 80 C132 88 130 94 126 100 C124 90 121 82 118 76 C117 86 115 92 111 97 C109 88 106 80 103 75 C102 84 101 90 98 95 C96 86 93 80 90 76 C89 84 87 90 84 96 C82 88 79 83 76 80 C75 88 73 94 70 98 C68 92 66 88 64 86 C62 92 60 98 57 104 Z" fill="url(#hair-grad)" stroke="#6b2424" stroke-width="0.8" stroke-linejoin="round"/>
-              <path d="M103 44 Q104 60 103 75 M90 48 Q90 64 90 76 M116 47 Q118 62 118 76 M127 53 Q131 68 133 80 M78 54 Q76 70 76 80" fill="none" stroke="#7a2a2a" stroke-width="0.9" opacity="0.5"/>
-              <path d="M74 60 Q86 52 97 51 M104 51 Q116 52 126 60" fill="none" stroke="#ffd9a8" stroke-width="2.5" stroke-linecap="round" opacity="0.45"/>
-              <path d="M78 58 Q88 53 96 53" fill="none" stroke="#fff" stroke-width="1.6" stroke-linecap="round" opacity="0.6"/>
-              <!-- Hair clip: a little spark of dawn -->
-              <path class="spark" d="M132 70 L134.2 76.8 L141 79 L134.2 81.2 L132 88 L129.8 81.2 L123 79 L129.8 76.8 Z" fill="#ffd166" stroke="#fff6d6" stroke-width="0.8"/>
-            </g>
-
-            <!-- Ahoge: the little strand on top -->
-            <g id="c-ahoge">
-              <path d="M101 42 C96 30 100 20 110 17 C104 24 104 31 108 36 C106 38 104 40 103 43 Z" fill="url(#hair-grad)" stroke="#6b2424" stroke-width="0.7"/>
-            </g>
-          </g>
-        </g>
-        </g>
-      </svg>
-      <p class="mood" id="mood">zzz...</p>
+    <section class="stage" id="stage" data-state="sleeping" aria-label="Delta's character">
+      <div class="viewport" id="viewport">
+        <canvas id="character-canvas" role="img" aria-label="Delta, a 3D anime-style character"></canvas>
+        <div class="zzz-layer" aria-hidden="true"><span>z</span><span>z</span><span>z</span></div>
+      </div>
+      <p class="mood" id="mood">Loading Delta...</p>
     </section>
 
     <div class="convo">
@@ -490,6 +340,15 @@
     </div>
   </main>
 
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/",
+        "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3.5.5/lib/three-vrm.module.min.js"
+      }
+    }
+  </script>
   <script type="module">
     // Two brains: the real Delta model (Ollama on the owner's PC, via the
     // Cloudflare tunnel in config.json), or a small model that runs in the
@@ -504,46 +363,32 @@
     const input = document.getElementById("input");
     const sendBtn = document.getElementById("send");
     const loadBtn = document.getElementById("load");
-    // Small avatars are a static close-up of the character's face, cloned once
-    // before the animation starts so they never copy a mid-blink frame.
-    const avatarTemplate = (() => {
-      const face = document.getElementById("character").cloneNode(true);
-      face.querySelectorAll("[id]").forEach((el) => el.removeAttribute("id"));
-      face.querySelectorAll(".zzz, .mouth-open, .eye-closed").forEach((el) => el.remove());
-      face.removeAttribute("id");
-      face.removeAttribute("data-state");
-      face.removeAttribute("role");
-      face.setAttribute("aria-hidden", "true");
-      face.setAttribute("viewBox", "54 44 92 92");
-      face.classList.add("face");
-      return face;
-    })();
-    const makeAvatar = () => avatarTemplate.cloneNode(true);
+    // Small avatars show a snapshot of Delta's face once her model has loaded.
+    const PLACEHOLDER_FACE = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1 1'%3E%3Crect width='1' height='1' fill='%23f2613a'/%3E%3C/svg%3E";
+    let avatarSrc = PLACEHOLDER_FACE;
+
+    function makeAvatar() {
+      const img = new Image();
+      img.className = "face";
+      img.alt = "";
+      img.src = avatarSrc;
+      return img;
+    }
+
+    function setAvatarSrc(src) {
+      avatarSrc = src;
+      document.querySelectorAll("img.face").forEach((img) => { img.src = src; });
+      document.querySelector('link[rel="icon"]').href = src;
+    }
 
     document.getElementById("header-avatar").prepend(makeAvatar());
 
-    // ---- Character: a Live2D-style rig driven by one animation loop ----
+    // ---- Character: Delta's VRM model, animated with three.js + three-vrm ----
     const character = (() => {
-      const svg = document.getElementById("character");
+      const stage = document.getElementById("stage");
+      const viewport = document.getElementById("viewport");
+      const canvas = document.getElementById("character-canvas");
       const moodEl = document.getElementById("mood");
-      const part = (id) => svg.querySelector("#" + id);
-      const body = part("c-body");
-      const hairBack = part("c-hair-back");
-      const head = part("c-head");
-      const face = part("c-face");
-      const bangs = part("c-bangs");
-      const lockL = part("c-lock-l");
-      const lockR = part("c-lock-r");
-      const ahoge = part("c-ahoge");
-      const smile = part("c-smile");
-      const mouth = part("c-mouth-open");
-      const eyes = [...svg.querySelectorAll(".eye")].map((eye) => ({
-        open: eye.querySelector(".eye-open"),
-        closed: eye.querySelector(".eye-closed"),
-        pupil: eye.querySelector(".pupil"),
-        cy: Number(eye.dataset.cy),
-      }));
-
       const moods = {
         sleeping: "zzz...",
         idle: "",
@@ -553,6 +398,7 @@
       };
       const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
       let state = "sleeping";
+      let loaded = false;
       let pointer = null;
       let pointerTime = -Infinity;
       let listenTimer = null;
@@ -560,37 +406,39 @@
       let blinkUntil = 0;
       let nextBlink = 0;
 
-      // Smoothed values chase their targets every frame; springs give the hair its lag and bounce.
-      const cur = { lx: 0, ly: 0.5, tilt: 7, blink: 1, mouth: 0 };
-      const ease = { lx: 0.07, ly: 0.07, tilt: 0.05, blink: 0.55, mouth: 0.45 };
-      const spring = () => ({ a: 0, v: 0 });
-      const hair = { lockL: spring(), lockR: spring(), ahoge: spring() };
-
       const clamp = (v, lo = -1, hi = 1) => Math.max(lo, Math.min(hi, v));
-      const f = (n) => n.toFixed(2);
-      const translate = (x, y) => `translate(${f(x)} ${f(y)})`;
-      const rotate = (a, cx, cy) => `rotate(${f(a)} ${cx} ${cy})`;
-      const scaleY = (s, cy) => `matrix(1 0 0 ${f(s)} 0 ${f(cy * (1 - s))})`;
+
+      function set(next) {
+        state = next;
+        stage.dataset.state = next;
+        if (loaded) moodEl.textContent = moods[next];
+      }
+
+      window.addEventListener("pointermove", (e) => {
+        pointer = { x: e.clientX, y: e.clientY };
+        pointerTime = performance.now();
+      });
 
       // Where to look, as -1..1 on each axis, toward a point on screen.
       function lookAt(x, y) {
-        const box = svg.getBoundingClientRect();
+        const box = viewport.getBoundingClientRect();
         return [
-          clamp((x - (box.left + box.width / 2)) / 400),
-          clamp((y - (box.top + box.height * 0.45)) / 300),
+          clamp((x - (box.left + box.width / 2)) / 500),
+          clamp((y - (box.top + box.height * 0.35)) / 400),
         ];
       }
 
+      // What her head and face should be doing right now, for the current mood.
       function targets(t) {
-        const out = { lx: 0, ly: 0, tilt: 0, blink: 0, mouth: 0 };
-        if (state === "sleeping") return { ...out, ly: 0.5, tilt: 7, blink: 1 };
+        const out = { lx: 0, ly: 0, tilt: 0, blink: 0, aa: 0, oh: 0, happy: 0, relaxed: 0, sleep: 0 };
+        if (state === "sleeping") return { ...out, blink: 1, relaxed: 0.3, sleep: 1 };
 
         if (state === "thinking") {
-          Object.assign(out, { lx: 0.55, ly: -0.75, tilt: -6 });
+          Object.assign(out, { lx: 0.5, ly: -0.6, tilt: -1 });
         } else if (state === "listening" && t - pointerTime > 1500) {
           const box = input.getBoundingClientRect();
           [out.lx, out.ly] = lookAt(box.left + box.width / 2, box.top);
-          out.tilt = 3;
+          out.tilt = 0.6;
         } else if (pointer && t - pointerTime < 4000) {
           [out.lx, out.ly] = lookAt(pointer.x, pointer.y);
         } else if (!reduceMotion) {
@@ -599,9 +447,13 @@
           out.ly = Math.sin(t / 3100) * 0.25;
         }
 
+        if (state === "listening") out.happy = 0.25;
         if (state === "talking") {
-          out.mouth = reduceMotion ? 0.5 : 0.3 + 0.7 * Math.abs(Math.sin(t / 55) * Math.sin(t / 137));
-          out.ly += Math.sin(t / 160) * 0.08;
+          const open = reduceMotion ? 0.5 : Math.abs(Math.sin(t / 55) * Math.sin(t / 137));
+          out.aa = 0.15 + 0.6 * open;
+          out.oh = 0.3 * Math.abs(Math.sin(t / 90));
+          out.ly += Math.sin(t / 160) * 0.06;
+          out.happy = 0.1;
         }
 
         if (t > nextBlink) {
@@ -612,70 +464,127 @@
         return out;
       }
 
-      function step(s, target, k, damping) {
-        s.v += (target - s.a) * k - s.v * damping;
-        s.a += s.v;
-      }
+      async function load() {
+        const THREE = await import("three");
+        const { GLTFLoader } = await import("three/addons/loaders/GLTFLoader.js");
+        const { VRMLoaderPlugin, VRMUtils } = await import("@pixiv/three-vrm");
 
-      let lastT = null;
-      let springTime = 0;
+        const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 20);
+        const light = new THREE.DirectionalLight(0xffffff, Math.PI);
+        light.position.set(1, 1, 1).normalize();
+        scene.add(light);
 
-      function frame(t) {
-        // Scale everything by elapsed time so motion looks the same at any refresh rate.
-        const frames = lastT === null ? 1 : Math.min(4, (t - lastT) / 16.67);
-        lastT = t;
-        const goal = targets(t);
-        for (const key in cur) cur[key] += (goal[key] - cur[key]) * (1 - Math.pow(1 - ease[key], frames));
-        const { lx, ly, tilt, blink } = cur;
+        const loader = new GLTFLoader();
+        loader.register((parser) => new VRMLoaderPlugin(parser));
+        const gltf = await loader.loadAsync("VRM/Delta.vrm", (e) => {
+          if (e.total) moodEl.textContent = `Loading Delta... ${Math.round((e.loaded / e.total) * 100)}%`;
+        });
+        const vrm = gltf.userData.vrm;
+        VRMUtils.removeUnnecessaryVertices(gltf.scene);
+        VRMUtils.combineSkeletons(gltf.scene);
+        vrm.scene.traverse((obj) => { obj.frustumCulled = false; });
+        scene.add(vrm.scene);
 
-        const breathSpeed = state === "sleeping" ? 875 : 573;
-        const breath = reduceMotion ? 0 : Math.sin(t / breathSpeed);
-        const headTurn = lx * 4 + tilt;
+        const bone = (name) => vrm.humanoid.getNormalizedBoneNode(name);
+        // Arms down and relaxed instead of the default T-pose.
+        bone("leftUpperArm").rotation.z = -1.25;
+        bone("rightUpperArm").rotation.z = 1.25;
+        bone("leftLowerArm").rotation.z = -0.15;
+        bone("rightLowerArm").rotation.z = 0.15;
+        vrm.update(0);
+        scene.updateMatrixWorld(true);
 
-        // Hair hangs, so it swings against the head's rotation and settles with a bounce.
-        // Springs advance in fixed 60fps steps so they stay stable on fast or slow screens.
-        springTime += frames;
-        while (springTime >= 1) {
-          step(hair.lockL, -headTurn * 0.8, 0.04, 0.12);
-          step(hair.lockR, -headTurn * 0.8, 0.04, 0.12);
-          step(hair.ahoge, -headTurn * 1.4 + (reduceMotion ? 0 : Math.sin(t / 700) * 4), 0.06, 0.08);
-          springTime -= 1;
+        const headPos = new THREE.Vector3();
+        vrm.humanoid.getRawBoneNode("head").getWorldPosition(headPos);
+        const focusY = headPos.y - 0.06; // between face and shoulders
+
+        const lookTarget = new THREE.Object3D();
+        scene.add(lookTarget);
+        vrm.lookAt.target = lookTarget;
+
+        // Frame head and shoulders, backing off on narrow screens so the shoulders still fit.
+        function resize() {
+          const w = viewport.clientWidth;
+          const h = viewport.clientHeight;
+          if (!w || !h) return;
+          renderer.setSize(w, h, false);
+          camera.aspect = w / h;
+          const distance = 0.4 / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+          camera.position.set(0, focusY, distance * Math.max(1, 0.8 / camera.aspect));
+          camera.lookAt(0, focusY, 0);
+          camera.updateProjectionMatrix();
         }
+        new ResizeObserver(resize).observe(viewport);
+        resize();
 
-        // Parallax: layers nearer the viewer move further, which reads as depth.
-        body.setAttribute("transform", translate(lx * 0.8, -breath * 1.2));
-        hairBack.setAttribute("transform", `${translate(-lx * 0.5, ly * 0.5)} ${rotate(headTurn, 100, 150)}`);
-        head.setAttribute("transform", `${translate(lx * 2, ly * 1.5)} ${rotate(headTurn, 100, 150)}`);
-        face.setAttribute("transform", translate(lx * 3.5, ly * 2.5));
-        bangs.setAttribute("transform", translate(lx * 4.5, ly * 1.5));
-        lockL.setAttribute("transform", `${translate(lx, 0)} ${rotate(hair.lockL.a, 66, 86)}`);
-        lockR.setAttribute("transform", `${translate(lx, 0)} ${rotate(hair.lockR.a, 134, 86)}`);
-        ahoge.setAttribute("transform", `${translate(lx * 4, ly)} ${rotate(hair.ahoge.a, 103, 43)}`);
-
-        for (const eye of eyes) {
-          eye.open.setAttribute("transform", scaleY(1 - blink * 0.92, eye.cy));
-          eye.open.setAttribute("opacity", f(1 - clamp((blink - 0.7) / 0.3, 0, 1)));
-          eye.closed.setAttribute("opacity", f(clamp((blink - 0.55) / 0.35, 0, 1)));
-          eye.pupil.setAttribute("transform", translate(lx * 2.2, ly * 2.2));
+        // A one-off close-up of her face for the small avatars and the browser tab.
+        function snapshot() {
+          const size = 160;
+          const shot = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
+          shot.setSize(size, size);
+          const faceCam = new THREE.PerspectiveCamera(30, 1, 0.05, 10);
+          faceCam.position.set(0, headPos.y + 0.07, 0.6);
+          faceCam.lookAt(0, headPos.y + 0.07, 0);
+          shot.render(scene, faceCam);
+          const url = shot.domElement.toDataURL("image/png");
+          shot.dispose();
+          shot.forceContextLoss();
+          return url;
         }
+        setAvatarSrc(snapshot());
 
-        mouth.setAttribute("transform", scaleY(cur.mouth, 135.5));
-        smile.setAttribute("opacity", f(1 - clamp(cur.mouth * 2, 0, 1)));
+        loaded = true;
+        set(state);
 
+        // Smoothed values chase their targets every frame.
+        const cur = { lx: 0, ly: 0, tilt: 0, blink: 1, aa: 0, oh: 0, happy: 0, relaxed: 0.3, sleep: 1 };
+        const ease = { lx: 0.07, ly: 0.07, tilt: 0.05, blink: 0.55, aa: 0.45, oh: 0.3, happy: 0.08, relaxed: 0.05, sleep: 0.04 };
+        const head = bone("head");
+        const neck = bone("neck");
+        const spine = bone("spine");
+        const chest = bone("chest");
+        let lastT = null;
+
+        function frame(t) {
+          const dt = lastT === null ? 1 / 60 : Math.min(0.1, (t - lastT) / 1000);
+          lastT = t;
+          const goal = targets(t);
+          for (const key in cur) cur[key] += (goal[key] - cur[key]) * (1 - Math.pow(1 - ease[key], dt * 60));
+
+          const breath = reduceMotion ? 0 : Math.sin(t / (state === "sleeping" ? 875 : 573));
+          // The head turns part of the way toward what she's looking at; her eyes do the rest.
+          head.rotation.set(cur.ly * 0.25 + cur.sleep * 0.3, cur.lx * 0.35, cur.tilt * 0.1 + cur.sleep * 0.12);
+          if (neck) neck.rotation.set(cur.ly * 0.1, cur.lx * 0.15, 0);
+          spine.rotation.set(breath * 0.012, cur.lx * 0.05, 0);
+          if (chest) chest.rotation.x = breath * 0.015;
+
+          lookTarget.position.set(
+            camera.position.x + cur.lx * 0.6,
+            camera.position.y - cur.ly * 0.45,
+            camera.position.z,
+          );
+
+          const face = vrm.expressionManager;
+          face.setValue("blink", cur.blink);
+          face.setValue("aa", cur.aa);
+          face.setValue("oh", cur.oh);
+          face.setValue("happy", cur.happy);
+          face.setValue("relaxed", cur.relaxed);
+
+          vrm.update(dt); // also runs her hair and clothing physics
+          renderer.render(scene, camera);
+          requestAnimationFrame(frame);
+        }
         requestAnimationFrame(frame);
       }
-      requestAnimationFrame(frame);
 
-      window.addEventListener("pointermove", (e) => {
-        pointer = { x: e.clientX, y: e.clientY };
-        pointerTime = performance.now();
+      load().catch((err) => {
+        console.error(err);
+        moodEl.textContent = "Couldn't load Delta's 3D model.";
       });
-
-      function set(next) {
-        state = next;
-        svg.dataset.state = next;
-        moodEl.textContent = moods[next];
-      }
 
       return {
         set,
