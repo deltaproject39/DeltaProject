@@ -408,6 +408,9 @@
       let nextBlink = 0;
       let glance = { x: 0, y: 0 };
       let nextGlance = 0;
+      let wantWave = false;
+      // Filled in once the model loads; until then a wave request is remembered.
+      const gestureApi = { wave: () => { wantWave = true; }, hold: (name) => { gestureApi.held = name; }, held: null };
 
       const clamp = (v, lo = -1, hi = 1) => Math.max(lo, Math.min(hi, v));
 
@@ -509,7 +512,7 @@
 
         const headPos = new THREE.Vector3();
         vrm.humanoid.getRawBoneNode("head").getWorldPosition(headPos);
-        const focusY = headPos.y - 0.06; // between face and shoulders
+        const focusY = headPos.y - 0.13; // face down to the chest, so gestures stay in view
 
         const lookTarget = new THREE.Object3D();
         scene.add(lookTarget);
@@ -522,7 +525,7 @@
           if (!w || !h) return;
           renderer.setSize(w, h, false);
           camera.aspect = w / h;
-          const distance = 0.4 / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+          const distance = 0.48 / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
           camera.position.set(0, focusY, distance * Math.max(1, 0.8 / camera.aspect));
           camera.lookAt(0, focusY, 0);
           camera.updateProjectionMatrix();
@@ -558,7 +561,105 @@
         const chest = bone("chest");
         const hips = bone("hips");
         const shoulders = [bone("leftShoulder"), bone("rightShoulder")];
-        const upperArms = [bone("leftUpperArm"), bone("rightUpperArm")];
+
+        // ---- Arms and hands ----
+        // Poses are target rotations [x, y, z] in radians for the normalized bones, written for
+        // her LEFT arm; the right arm mirrors them. She faces +Z with arms along X in the rest pose:
+        //   upper arm: z < 0 lowers it, x < 0 swings it forward, y < 0 turns the forearm inward;
+        //   lower arm: y < 0 bends the elbow forward, z > 0 lifts the forearm sideways.
+        const mirror = ([x, y, z]) => [x, -y, -z];
+        const arm = (upper, lower, hand = [0, 0, 0], shoulder = 0) => ({ upper, lower, hand, shoulder });
+        const relaxed = arm([0, 0, -1.25], [0, -0.15, 0]);
+        const both = (a) => ({ left: a, right: a });
+        const POSES = {
+          rest: () => both(relaxed),
+          limp: () => both(arm([0.05, 0, -1.35], [0, -0.05, 0])),
+          wave: (t) => ({
+            left: relaxed,
+            right: arm([-0.5, 0, -0.9], [0, 0, 2.2 + Math.sin(t / 110) * 0.35], [0, 0, 0.2]),
+          }),
+          chin: () => ({
+            left: arm([-0.2, -0.5, -1.2], [0, -1.2, 0]),
+            right: arm([-0.6, -0.5, -1.2], [0, -2.2, 0]),
+          }),
+          clasp: () => both(arm([-0.25, -0.6, -1.2], [0, -1.4, 0])),
+          explainRight: (t) => ({
+            left: relaxed,
+            right: arm([-0.45, -0.5, -1.15], [0, -1.3 + Math.sin(t / 260) * 0.15, 0], [0, 0, 0.2]),
+          }),
+          explainLeft: (t) => ({
+            left: arm([-0.45, -0.5, -1.15], [0, -1.3 + Math.sin(t / 260) * 0.15, 0], [0, 0, 0.2]),
+            right: relaxed,
+          }),
+          open: (t) => both(arm([-0.4, -0.35, -1.2], [0, -1.1 + Math.sin(t / 300) * 0.12, 0])),
+          hair: () => ({ left: relaxed, right: arm([-0.35, 0.1, -0.2], [0, -2.4, 0]) }),
+          shrug: () => both(arm([-0.25, 0.3, -1.35], [0, -1.3, 0], [0, 0, 0], 0.15)),
+        };
+        const TALK_GESTURES = ["explainRight", "explainLeft", "open", "rest"];
+        const IDLE_ACTIONS = ["clasp", "hair", "shrug", "explainRight"];
+        const pick = (list) => list[Math.floor(Math.random() * list.length)];
+
+        const armBones = ["UpperArm", "LowerArm", "Hand"].flatMap((name) => ["left", "right"].map((side) => {
+          const node = bone(side + name);
+          return { node, side, key: name === "UpperArm" ? "upper" : name === "LowerArm" ? "lower" : "hand", target: new THREE.Quaternion() };
+        }));
+        // Slightly curled fingers look relaxed rather than stiff.
+        const fingerBones = ["Index", "Middle", "Ring", "Little"].flatMap((finger) =>
+          ["Proximal", "Intermediate", "Distal"].flatMap((joint, i) => ["left", "right"].map((side) => ({
+            node: bone(side + finger + joint),
+            curl: [0.25, 0.35, 0.3][i] * (side === "left" ? -1 : 1),
+          })))).filter((f) => f.node);
+        const euler = new THREE.Euler();
+
+        let nextIdleAction = performance.now() + 4000;
+        let nextTalkGesture = 0;
+        let pendingWave = wantWave;
+        gestureApi.wave = () => { pendingWave = true; };
+
+        function chooseGesture(t) {
+          if (gestureApi.held) return gestureApi.held;
+          if (state === "sleeping") return "limp";
+          if (pendingWave) {
+            pendingWave = false;
+            gesture = "wave";
+            gestureUntil = t + 2600;
+          }
+          if (gesture === "wave" && t < gestureUntil) return "wave";
+          if (state === "thinking") return "chin";
+          if (state === "listening") return "clasp";
+          if (state === "talking") {
+            if (t > nextTalkGesture) {
+              gesture = pick(TALK_GESTURES);
+              nextTalkGesture = t + 1200 + Math.random() * 1500;
+            }
+            return gesture;
+          }
+          if (t < gestureUntil) return gesture;
+          if (t > nextIdleAction) {
+            gesture = pick(IDLE_ACTIONS);
+            gestureUntil = t + 2500 + Math.random() * 2000;
+            nextIdleAction = gestureUntil + 5000 + Math.random() * 7000;
+            return gesture;
+          }
+          return "rest";
+        }
+        let gesture = "rest";
+        let gestureUntil = 0;
+
+        function updateArms(t, dt, breath) {
+          const pose = POSES[chooseGesture(t)](t);
+          const k = 1 - Math.pow(1 - 0.1, dt * 60);
+          for (const b of armBones) {
+            const values = pose[b.side][b.key];
+            euler.fromArray(b.side === "left" ? values : mirror(values));
+            b.target.setFromEuler(euler);
+            b.node.quaternion.slerp(b.target, k);
+          }
+          for (const f of fingerBones) f.node.rotation.z = f.curl;
+          // Shoulders rise with each breath, and with a shrug.
+          if (shoulders[0]) shoulders[0].rotation.z += ((breath * 0.03 + pose.left.shoulder) - shoulders[0].rotation.z) * k;
+          if (shoulders[1]) shoulders[1].rotation.z += ((-breath * 0.03 - pose.right.shoulder) - shoulders[1].rotation.z) * k;
+        }
         let lastT = null;
 
         function frame(t) {
@@ -584,10 +685,7 @@
           if (hips) hips.rotation.z = sway * 0.035;
           spine.rotation.set(breath * 0.02 + cur.sleep * 0.08, cur.lx * 0.1, -sway * 0.025);
           if (chest) chest.rotation.x = breath * 0.025;
-          shoulders[0] && (shoulders[0].rotation.z = breath * 0.03);
-          shoulders[1] && (shoulders[1].rotation.z = -breath * 0.03);
-          upperArms[0].rotation.z = -1.25 + breath * 0.02;
-          upperArms[1].rotation.z = 1.25 - breath * 0.02;
+          updateArms(t, dt, breath);
 
           lookTarget.position.set(
             camera.position.x + cur.lx * 0.6,
@@ -624,6 +722,9 @@
           clearTimeout(listenTimer);
           listenTimer = setTimeout(() => state === "listening" && set("idle"), 1500);
         },
+        wave: () => gestureApi.wave(),
+        // Pin one pose, e.g. character.hold("chin"); handy for tweaking poses from the console.
+        hold: (name) => gestureApi.hold(name),
         // Called for every streamed piece of a reply; the mouth stops shortly after the words do.
         talk() {
           if (state !== "talking") set("talking");
@@ -690,6 +791,7 @@
       sendBtn.disabled = false;
       input.focus();
       character.set("idle");
+      character.wave();
       addMessage("delta", greeting);
       character.talk();
     }
