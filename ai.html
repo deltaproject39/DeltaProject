@@ -1004,11 +1004,23 @@
       }
     });
 
+    // The most recent messages that fit in what Delta can keep in mind at once.
+    function recentHistory(maxChars = 12000, maxMessages = 20) {
+      const recent = [];
+      let total = 0;
+      for (let i = history.length - 1; i >= 0 && recent.length < maxMessages; i--) {
+        total += history[i].content.length;
+        if (total > maxChars && recent.length > 0) break;
+        recent.unshift(history[i]);
+      }
+      return recent;
+    }
+
     async function* askDelta() {
       const res = await fetch(deltaServer + "/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: history }),
+        body: JSON.stringify({ messages: recentHistory() }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));

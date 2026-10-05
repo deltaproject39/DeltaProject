@@ -13,7 +13,7 @@ const ALLOWED_ORIGINS = [
   "https://deltaproject39.github.io",
   "http://localhost:8000", // for testing the page locally
 ];
-const MAX_BODY_BYTES = 20_000;      // whole request
+const MAX_BODY_BYTES = 64_000;      // whole request
 const MAX_MESSAGES = 20;            // conversation history kept per request
 const MAX_MESSAGE_CHARS = 2_000;    // per message
 const MAX_REPLY_TOKENS = 512;
@@ -45,18 +45,24 @@ function rateLimited(map, id, limit) {
   return recent.length > limit;
 }
 
-// Collects a small request body; oversized requests are dropped.
-function readBody(req, onDone) {
+// Collects a request body up to MAX_BODY_BYTES. Anything bigger gets a clear 413 (with CORS
+// headers so the page can show why) rather than a dropped connection, which the browser
+// would only report as "Failed to fetch".
+function readBody(req, res, cors, onDone) {
   let body = "";
   let tooBig = false;
   req.on("data", (chunk) => {
+    if (tooBig) return;
     body += chunk;
     if (body.length > MAX_BODY_BYTES) {
       tooBig = true;
-      req.destroy();
+      body = "";
     }
   });
-  req.on("end", () => { if (!tooBig) onDone(body); });
+  req.on("end", () => {
+    if (tooBig) return send(res, 413, { error: "That was too much to send at once. Try reloading the page." }, cors);
+    onDone(body);
+  });
 }
 
 async function readEmotion(res, cors, body) {
@@ -154,14 +160,14 @@ const server = http.createServer((req, res) => {
     if (rateLimited(ttsHits, visitorId(req), TTS_RATE_LIMIT)) {
       return send(res, 429, { error: "Slow down a bit and try again in a minute." }, cors);
     }
-    return readBody(req, (body) => speak(res, cors, body));
+    return readBody(req, res, cors, (body) => speak(res, cors, body));
   }
 
   if (req.method === "POST" && req.url === "/emotion") {
     if (rateLimited(emotionHits, visitorId(req), EMOTION_RATE_LIMIT)) {
       return send(res, 429, { error: "Slow down a bit and try again in a minute." }, cors);
     }
-    return readBody(req, (body) => readEmotion(res, cors, body));
+    return readBody(req, res, cors, (body) => readEmotion(res, cors, body));
   }
 
   if (req.method !== "POST" || req.url !== "/chat") {
@@ -172,18 +178,7 @@ const server = http.createServer((req, res) => {
     return send(res, 429, { error: "Slow down a bit and try again in a minute." }, cors);
   }
 
-  let body = "";
-  let tooBig = false;
-  req.on("data", (chunk) => {
-    body += chunk;
-    if (body.length > MAX_BODY_BYTES) {
-      tooBig = true;
-      req.destroy();
-    }
-  });
-
-  req.on("end", async () => {
-    if (tooBig) return;
+  readBody(req, res, cors, async (body) => {
     let messages;
     try {
       messages = cleanMessages(JSON.parse(body).messages);
