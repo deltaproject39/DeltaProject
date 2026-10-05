@@ -179,6 +179,43 @@
       font-style: italic;
     }
 
+    /* Emotion panel: one bar per feeling */
+    .emotions {
+      width: 100%;
+      max-width: 300px;
+      margin: 6px auto 0;
+      padding: 0;
+      list-style: none;
+      display: grid;
+      gap: 4px;
+      font-size: 0.78rem;
+    }
+    @media (max-width: 899px) {
+      .emotions { max-width: 520px; grid-template-columns: 1fr 1fr; column-gap: 16px; }
+    }
+    .emotions li {
+      display: grid;
+      grid-template-columns: 1.3em 5.2em 1fr 2.6em;
+      align-items: center;
+      gap: 6px;
+      color: var(--muted);
+    }
+    .emotions li.top { color: var(--text); font-weight: 600; }
+    .emotions .bar {
+      height: 6px;
+      border-radius: 999px;
+      background: var(--border);
+      overflow: hidden;
+    }
+    .emotions .fill {
+      height: 100%;
+      width: 0;
+      border-radius: inherit;
+      background: var(--c);
+      transition: width 0.6s ease;
+    }
+    .emotions .pct { text-align: right; font-variant-numeric: tabular-nums; }
+
     /* Sleepy "z"s floating up while Delta is offline */
     .zzz-layer { position: absolute; top: 16%; left: 62%; pointer-events: none; }
     .zzz-layer span { position: absolute; opacity: 0; color: var(--dawn-1); font-weight: 700; }
@@ -334,6 +371,7 @@
         <div class="zzz-layer" aria-hidden="true"><span>z</span><span>z</span><span>z</span></div>
       </div>
       <p class="mood" id="mood">Loading Delta...</p>
+      <ul class="emotions" id="emotions" aria-label="How Delta is feeling"></ul>
     </section>
 
     <div class="convo">
@@ -422,6 +460,8 @@
       let nextGlance = 0;
       let wantWave = false;
       let voiceLevel = null; // loudness of her speech, or null when she isn't speaking aloud
+      // What she's feeling right now, from the emotion reader; fades out after `until`.
+      let feeling = { emotion: "neutral", strength: 0, until: 0 };
       // Filled in once the model loads; until then a wave request is remembered.
       const gestureApi = { wave: () => { wantWave = true; }, hold: (name) => { gestureApi.held = name; }, held: null };
 
@@ -449,7 +489,7 @@
 
       // What her head and face should be doing right now, for the current mood.
       function targets(t) {
-        const out = { lx: 0, ly: 0, tilt: 0, blink: 0, aa: 0, oh: 0, happy: 0, relaxed: 0, sleep: 0 };
+        const out = { lx: 0, ly: 0, tilt: 0, blink: 0, aa: 0, oh: 0, happy: 0, relaxed: 0, sleep: 0, sad: 0, angry: 0, surprised: 0 };
         if (state === "sleeping") return { ...out, blink: 1, relaxed: 0.3, sleep: 1 };
 
         if (state === "thinking") {
@@ -486,6 +526,19 @@
           out.ly += Math.sin(t / 160) * 0.12 * motion;
           out.tilt += Math.sin(t / 700) * 0.6 * motion;
           out.happy = 0.15;
+        }
+
+        // Her current feeling shows on her face and in how she holds her head.
+        if (t < feeling.until) {
+          const s = feeling.strength * Math.min(1, (feeling.until - t) / 800);
+          switch (feeling.emotion) {
+            case "happy": out.happy = Math.max(out.happy, 0.6 * s); out.tilt += 0.4 * s; break;
+            case "sad": out.sad = 0.7 * s; out.ly += 0.35 * s; break;
+            case "angry": out.angry = 0.6 * s; out.tilt -= 0.3 * s; break;
+            case "surprised": out.surprised = 0.8 * s; out.ly -= 0.25 * s; break;
+            case "curious": out.surprised = 0.3 * s; out.tilt += 0.9 * s; break;
+            case "scared": out.sad = 0.4 * s; out.surprised = 0.4 * s; break;
+          }
         }
 
         if (t > nextBlink) {
@@ -572,8 +625,11 @@
         set(state);
 
         // Smoothed values chase their targets every frame.
-        const cur = { lx: 0, ly: 0, tilt: 0, blink: 1, aa: 0, oh: 0, happy: 0, relaxed: 0.3, sleep: 1 };
-        const ease = { lx: 0.09, ly: 0.09, tilt: 0.05, blink: 0.55, aa: 0.45, oh: 0.3, happy: 0.08, relaxed: 0.05, sleep: 0.04 };
+        const cur = { lx: 0, ly: 0, tilt: 0, blink: 1, aa: 0, oh: 0, happy: 0, relaxed: 0.3, sleep: 1, sad: 0, angry: 0, surprised: 0 };
+        const ease = {
+          lx: 0.09, ly: 0.09, tilt: 0.05, blink: 0.55, aa: 0.45, oh: 0.3,
+          happy: 0.08, relaxed: 0.05, sleep: 0.04, sad: 0.08, angry: 0.08, surprised: 0.12,
+        };
         const head = bone("head");
         const neck = bone("neck");
         const spine = bone("spine");
@@ -653,6 +709,11 @@
           if (state === "thinking") return "chin";
           if (state === "listening") return "clasp";
           if (state === "talking") {
+            // Strong feelings change how she holds her hands.
+            if (t < feeling.until && feeling.strength > 0.5) {
+              if (feeling.emotion === "sad" || feeling.emotion === "scared") return "clasp";
+              if (feeling.emotion === "surprised") return "open";
+            }
             if (t > nextTalkGesture) {
               gesture = pick(TALK_GESTURES);
               nextTalkGesture = t + 1200 + Math.random() * 1500;
@@ -730,6 +791,9 @@
           face.setValue("oh", cur.oh);
           face.setValue("happy", cur.happy);
           face.setValue("relaxed", cur.relaxed);
+          face.setValue("sad", cur.sad);
+          face.setValue("angry", cur.angry);
+          face.setValue("surprised", cur.surprised);
 
           vrm.update(dt); // also runs her hair and clothing physics
           renderer.render(scene, camera);
@@ -755,6 +819,10 @@
         },
         wave: () => gestureApi.wave(),
         voice: (level) => { voiceLevel = level; },
+        // Show a feeling (happy, sad, angry, surprised, curious, scared) for a while.
+        feel: (emotion, strength, ms = 3500) => {
+          feeling = { emotion, strength: clamp(strength, 0, 1), until: performance.now() + ms };
+        },
         // Pin one pose, e.g. character.hold("chin"); handy for tweaking poses from the console.
         hold: (name) => gestureApi.hold(name),
         // Called for every streamed piece of a reply; the mouth stops shortly after the words do.
@@ -897,6 +965,51 @@
       for await (const chunk of stream) yield chunk.choices[0]?.delta?.content || "";
     }
 
+    // ---- Emotion panel: how strongly she feels each emotion right now ----
+    const emotionPanel = (() => {
+      const FEELINGS = [
+        ["happy", "😊", "Happy", "#f5b83d"],
+        ["sad", "😢", "Sad", "#5b8def"],
+        ["angry", "😠", "Angry", "#e5484d"],
+        ["surprised", "😲", "Surprised", "#b56be0"],
+        ["curious", "🤔", "Curious", "#2bb3a3"],
+        ["scared", "😨", "Scared", "#8a8fa3"],
+        ["neutral", "😌", "Calm", "#9ac46b"],
+      ];
+      const CALM = { neutral: 1 };
+      const list = document.getElementById("emotions");
+      const rows = {};
+      for (const [key, emoji, name, color] of FEELINGS) {
+        const li = document.createElement("li");
+        li.innerHTML = `<span aria-hidden="true">${emoji}</span><span>${name}</span>` +
+          `<span class="bar"><span class="fill" style="--c:${color}"></span></span><span class="pct">0%</span>`;
+        list.append(li);
+        rows[key] = { li, fill: li.querySelector(".fill"), pct: li.querySelector(".pct") };
+      }
+      let resetTimer = null;
+
+      function render(groups) {
+        const top = Object.entries(groups).sort((a, b) => b[1] - a[1])[0]?.[0];
+        for (const [key, row] of Object.entries(rows)) {
+          const value = Math.round((groups[key] || 0) * 100);
+          row.fill.style.width = value + "%";
+          row.pct.textContent = value + "%";
+          row.li.classList.toggle("top", key === top && value > 0);
+        }
+      }
+
+      // Show a reading for `ms`, then settle back to calm.
+      function show(groups, ms = 3500) {
+        if (!groups) return;
+        render(groups);
+        clearTimeout(resetTimer);
+        resetTimer = setTimeout(() => render(CALM), ms);
+      }
+
+      render(CALM);
+      return { show };
+    })();
+
     // ---- Voice: Delta speaks her replies through the voice server on the owner's PC ----
     const voice = (() => {
       const button = document.getElementById("voice-toggle");
@@ -944,18 +1057,25 @@
           });
           if (!res.ok) throw new Error(res.status);
           working = true;
-          return await ctx.decodeAudioData(await res.arrayBuffer());
+          const feeling = parseFeeling(res.headers.get("X-Emotion"), res.headers.get("X-Emotion-Groups"));
+          return { buffer: await ctx.decodeAudioData(await res.arrayBuffer()), feeling };
         } catch {
           working = false;
           return null;
         }
       }
 
-      function play(buffer, gen) {
-        if (!buffer || gen !== generation || !enabled) return;
+      function play(clip, gen) {
+        if (!clip || gen !== generation || !enabled) return;
+        // Her face changes as she starts the sentence and holds for as long as it lasts.
+        if (clip.feeling) {
+          const ms = clip.buffer.duration * 1000 + 600;
+          character.feel(clip.feeling.emotion, clip.feeling.score, ms);
+          emotionPanel.show(clip.feeling.groups, ms);
+        }
         return new Promise((resolve) => {
           const source = ctx.createBufferSource();
-          source.buffer = buffer;
+          source.buffer = clip.buffer;
           source.connect(analyser);
           source.onended = () => {
             if (current === source) current = null;
@@ -978,7 +1098,7 @@
         if (!active() || !/[a-z0-9]/i.test(spoken)) return;
         const gen = generation;
         const audio = (fetching = fetching.then(() => (gen === generation ? fetchAudio(spoken) : null)));
-        playing = playing.then(() => audio).then((buffer) => play(buffer, gen));
+        playing = playing.then(() => audio).then((clip) => play(clip, gen));
       }
 
       function stop() {
@@ -1002,6 +1122,42 @@
 
       return { unlock, say, stop, active };
     })();
+
+    // "happy:0.93:amusement" + "happy=0.93,sad=0.01,..." -> { emotion, score, label, groups }
+    function parseFeeling(tag, groupsTag) {
+      if (!tag) return null;
+      const [emotion, score, label] = tag.split(":");
+      const groups = groupsTag
+        ? Object.fromEntries(groupsTag.split(",").map((pair) => pair.split("=")).map(([k, v]) => [k, Number(v)]))
+        : { [emotion]: Number(score) };
+      return { emotion, score: Number(score), label, groups };
+    }
+
+    // Asks Delta's PC how a piece of text feels: { emotion, label, score }, or null if offline.
+    async function readEmotion(text) {
+      if (!deltaServer) return null;
+      try {
+        const res = await fetch(deltaServer + "/emotion", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text }),
+        });
+        return res.ok ? await res.json() : null;
+      } catch {
+        return null;
+      }
+    }
+
+    // Speak a finished sentence (the feeling arrives with the audio), or with voice off,
+    // just show its feeling.
+    function express(sentence) {
+      if (voice.active()) return voice.say(sentence);
+      readEmotion(sentence).then((f) => {
+        if (!f) return;
+        character.feel(f.emotion, f.score);
+        emotionPanel.show(f.groups);
+      });
+    }
 
     // Splits streamed text into sentences as they complete, so she can start speaking early.
     function takeSentences(text, flush = false) {
@@ -1030,6 +1186,13 @@
       history.push({ role: "user", content: text });
       const bubble = addMessage("delta", null);
       character.set("thinking");
+      // While she thinks, her face reacts to what you said: concern for bad news, a smile for good.
+      readEmotion(text).then((f) => {
+        const empathy = { sad: "sad", scared: "sad", angry: "sad", happy: "happy", surprised: "surprised", curious: "curious" };
+        if (!f || !empathy[f.emotion] || character.state !== "thinking") return;
+        character.feel(empathy[f.emotion], f.score * 0.7, 6000);
+        emotionPanel.show({ [empathy[f.emotion]]: f.score * 0.7, neutral: f.groups?.neutral ?? 0 }, 6000);
+      });
 
       try {
         let reply = "";
@@ -1038,7 +1201,7 @@
           reply += piece;
           unspoken += piece;
           const { sentences, rest } = takeSentences(unspoken);
-          sentences.forEach(voice.say);
+          sentences.forEach(express);
           unspoken = rest;
           if (reply) {
             bubble.textContent = reply;
@@ -1047,7 +1210,7 @@
           }
           scrollDown();
         }
-        takeSentences(unspoken, true).sentences.forEach(voice.say);
+        takeSentences(unspoken, true).sentences.forEach(express);
         history.push({ role: "assistant", content: reply });
       } catch (err) {
         bubble.textContent = "Hmm, something went wrong: " + err.message;

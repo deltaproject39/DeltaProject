@@ -1,7 +1,7 @@
 // Gatekeeper: the only thing exposed to the internet through Cloudflare Tunnel.
 // It forwards chat requests to the local Ollama, but only for the Delta model,
-// and speech requests (text only) to Delta's voice server, with size limits and
-// per-visitor rate limits. Everything else is refused.
+// and speech/emotion requests (text only) to Delta's voice server, with size limits
+// and per-visitor rate limits. Everything else is refused.
 // Run: node server/gatekeeper.js
 
 const http = require("http");
@@ -25,9 +25,11 @@ const TTS = "http://127.0.0.1:8788";
 const MAX_TTS_CHARS = 600;          // about a sentence or two per request
 const TTS_RATE_LIMIT = 40;          // spoken chunks per minute, per visitor
 const MAX_TTS_CONCURRENT = 2;
+const EMOTION_RATE_LIMIT = 120;     // emotion reads per minute, per visitor (they're cheap)
 
 const hits = new Map();
 const ttsHits = new Map();
+const emotionHits = new Map();
 let active = 0;
 let ttsActive = 0;
 
@@ -57,6 +59,25 @@ function readBody(req, onDone) {
   req.on("end", () => { if (!tooBig) onDone(body); });
 }
 
+async function readEmotion(res, cors, body) {
+  let text = "";
+  try {
+    text = String(JSON.parse(body).text || "").trim().slice(0, MAX_TTS_CHARS);
+  } catch {}
+  if (!text) return send(res, 400, { error: "Bad request" }, cors);
+  try {
+    const upstream = await fetch(`${TTS}/emotion`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    if (!upstream.ok) throw new Error(`Voice server returned ${upstream.status}`);
+    send(res, 200, await upstream.json(), cors);
+  } catch (err) {
+    send(res, 502, { error: "Emotion reading is offline." }, cors);
+  }
+}
+
 async function speak(res, cors, body) {
   let text = "";
   try {
@@ -77,7 +98,15 @@ async function speak(res, cors, body) {
     });
     if (!upstream.ok) throw new Error(`Voice server returned ${upstream.status}`);
     const audio = Buffer.from(await upstream.arrayBuffer());
-    res.writeHead(200, { ...cors, "Content-Type": "audio/wav", "Content-Length": audio.length });
+    res.writeHead(200, {
+      ...cors,
+      "Content-Type": "audio/wav",
+      "Content-Length": audio.length,
+      // Which feeling this sentence was spoken with, so her face can match.
+      "X-Emotion": upstream.headers.get("x-emotion") || "neutral:1:neutral",
+      "X-Emotion-Groups": upstream.headers.get("x-emotion-groups") || "",
+      "Access-Control-Expose-Headers": "X-Emotion, X-Emotion-Groups",
+    });
     res.end(audio);
   } catch (err) {
     console.error(err.message);
@@ -126,6 +155,13 @@ const server = http.createServer((req, res) => {
       return send(res, 429, { error: "Slow down a bit and try again in a minute." }, cors);
     }
     return readBody(req, (body) => speak(res, cors, body));
+  }
+
+  if (req.method === "POST" && req.url === "/emotion") {
+    if (rateLimited(emotionHits, visitorId(req), EMOTION_RATE_LIMIT)) {
+      return send(res, 429, { error: "Slow down a bit and try again in a minute." }, cors);
+    }
+    return readBody(req, (body) => readEmotion(res, cors, body));
   }
 
   if (req.method !== "POST" || req.url !== "/chat") {
