@@ -3,6 +3,8 @@
 // Usage: node server/delta-self.js            show her notes about herself and recent journal
 //        node server/delta-self.js reflect    reflect now on conversations she hasn't thought about yet
 //        node server/delta-self.js diary      write a diary entry now from her recent reflections
+//        node server/delta-self.js roam       let her go roaming the web, following her curiosity
+//        node server/delta-self.js roam "deep sea creatures"   ...or send her somewhere to start
 
 const memory = require("./memory");
 
@@ -17,7 +19,11 @@ function show() {
   const entries = memory.journal(5).reverse();
   console.log(`\n=== Her journal (latest ${entries.length}) ===`);
   if (entries.length === 0) console.log("\n  (empty so far)");
-  for (const e of entries) console.log(`\n--- ${e.kind === "diary" ? "Diary" : "Reflection"}, ${when(e.created)} ---\n${e.entry}`);
+  const label = { diary: "Diary", reflection: "Reflection", exploration: "Roaming" };
+  for (const e of entries) {
+    const about = e.topic ? `: ${e.topic}` : "";
+    console.log(`\n--- ${label[e.kind] || e.kind}${about}, ${when(e.created)} ---\n${e.entry}`);
+  }
   console.log();
 }
 
@@ -27,6 +33,16 @@ function show() {
     console.log("Delta is reflecting... (this takes a little while)");
     const n = await memory.reflectIfDue(true);
     console.log(n ? `She reflected on ${n} conversation${n === 1 ? "" : "s"}.` : "Nothing new to reflect on.");
+  } else if (command === "roam") {
+    const topic = process.argv.slice(3).join(" ").trim();
+    console.log("Delta is off roaming the web... (a few minutes)");
+    const trip = await memory.roam(topic || undefined);
+    if (!trip) console.log("She couldn't find anything to read this time.");
+    else {
+      console.log(`She ${trip.how}, and went:`);
+      for (const stop of trip.stops) console.log(`  → ${stop.title}\n    ${stop.url}\n    "${stop.note}"`);
+      if (trip.next) console.log(`Next she wants to look up: ${trip.next}`);
+    }
   } else if (command === "diary") {
     console.log("Delta is writing her diary...");
     console.log((await memory.diaryIfDue(true)) ? "Done." : "She needs at least one reflection first (try 'reflect').");

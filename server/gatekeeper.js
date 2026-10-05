@@ -201,6 +201,11 @@ const server = http.createServer((req, res) => {
     return res.end();
   }
 
+  // Her public "roaming" feed: where she's been on her own and what she thought (no visitor data).
+  if (req.method === "GET" && req.url === "/roam") {
+    return send(res, 200, memory.explorations(), cors);
+  }
+
   if (req.method === "GET" && req.url === "/health") {
     return send(res, 200, { ok: true, model: MODEL }, cors);
   }

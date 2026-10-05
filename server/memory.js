@@ -87,11 +87,14 @@ db.exec(`
   );
   CREATE TABLE IF NOT EXISTS journal (
     id      INTEGER PRIMARY KEY,
-    kind    TEXT NOT NULL,          -- 'reflection' or 'diary'
+    kind    TEXT NOT NULL,          -- 'reflection', 'exploration' or 'diary'
     entry   TEXT NOT NULL,
     created INTEGER NOT NULL
   );
 `);
+const journalColumns = new Set(db.prepare("PRAGMA table_info(journal)").all().map((c) => c.name));
+if (!journalColumns.has("topic")) db.exec("ALTER TABLE journal ADD COLUMN topic TEXT");     // where a roam went
+if (!journalColumns.has("sources")) db.exec("ALTER TABLE journal ADD COLUMN sources TEXT"); // pages she read (JSON)
 const MAX_SAVED_MESSAGES = 200; // per visitor; older ones are dropped
 
 const MAX_PIN_FAILS = 5;
@@ -466,15 +469,17 @@ async function reflectIfDue(force = false) {
   return wrote;
 }
 
-// About once a day, a diary entry built from her recent reflections (which hold no private details).
+// About once a day, a diary entry built from her recent reflections and explorations
+// (which hold no private details about anyone).
 async function diaryIfDue(force = false) {
   const last = db.prepare("SELECT created FROM journal WHERE kind = 'diary' ORDER BY created DESC LIMIT 1").get()?.created || 0;
   if (!force && Date.now() - last < DIARY_EVERY_HOURS * 3600000) return false;
-  const reflections = db.prepare("SELECT entry FROM journal WHERE kind = 'reflection' AND created > ? ORDER BY created")
-    .all(last).map((r) => r.entry);
+  const reflections = db.prepare(`SELECT kind, topic, entry FROM journal
+    WHERE kind IN ('reflection', 'exploration') AND created > ? ORDER BY created`)
+    .all(last).map((r) => (r.kind === "exploration" ? `(After reading about ${r.topic}) ${r.entry}` : r.entry));
   if (reflections.length < (force ? 1 : MIN_REFLECTIONS_FOR_DIARY)) return false;
 
-  const entry = await writeInHerVoice(`These are the private notes you wrote to yourself since your last diary entry:
+  const entry = await writeInHerVoice(`These are the private notes you wrote to yourself since your last diary entry (about conversations, and things you explored on your own):
 
 ${reflections.slice(-8).map((r, i) => `(${i + 1}) ${r}`).join("\n\n")}
 
@@ -525,6 +530,10 @@ function startGrowing(isIdle) {
       .then(async () => {
         const reflections = await reflectIfDue();
         if (reflections) console.log(`Delta reflected on ${reflections} conversation${reflections === 1 ? "" : "s"}.`);
+        if (!isIdle()) return;
+        const trip = await roamIfDue(isIdle);
+        if (trip) console.log(`Delta went roaming (${trip.how}): ${trip.stops.map((s) => s.title).join(" → ")}`);
+        if (!isIdle()) return;
         if (await diaryIfDue()) console.log("Delta wrote in her diary.");
       })
       .catch((err) => console.error("Growth:", err.message));
@@ -534,14 +543,229 @@ function startGrowing(isIdle) {
 }
 
 function journal(limit = 10) {
-  return db.prepare("SELECT kind, entry, created FROM journal ORDER BY created DESC LIMIT ?").all(limit);
+  return db.prepare("SELECT kind, topic, entry, created FROM journal ORDER BY created DESC LIMIT ?").all(limit);
+}
+
+// ---- Roaming: her own free time on the web ----
+//
+// Every couple of hours, when nobody is talking to her, she goes roaming: she picks something
+// she's curious about (the thread she left off on, something on her mind, or now and then a
+// random article), searches the web, reads a page, notes what grabbed her and what she wants to
+// look up next, and follows that for a few hops. Then she writes about the trip in her journal.
+// She only reads: no forms, logins or downloads, and never anything on the local network.
+// If someone starts talking to her, she stops roaming and comes back.
+
+const WIKI = "https://en.wikipedia.org/w/api.php";
+const BOT_HEADERS = { "User-Agent": "DeltaProject/1.0 (https://deltaproject39.github.io/DeltaProject/)" };
+const BROWSER_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36",
+  "Accept-Language": "en",
+};
+const ROAM_EVERY_HOURS = 2;
+const MAX_ROAMS_PER_DAY = 8;
+const HOPS_PER_ROAM = 3;
+const RANDOM_CHANCE = 0.2;          // sometimes she just wanders somewhere unexpected
+const PAGE_CHARS = 3500;            // how much of a page she reads
+const MAX_PAGE_BYTES = 2_000_000;
+// Sites that are mostly video, login walls or feeds: nothing there for her to read.
+const SKIP_SITES = /(^|\.)(youtube\.com|youtu\.be|facebook\.com|instagram\.com|tiktok\.com|x\.com|twitter\.com|reddit\.com|pinterest\.\w+|linkedin\.com|quora\.com)$/i;
+
+const getMeta = (key) => db.prepare("SELECT value FROM meta WHERE key = ?").get(key)?.value ?? null;
+const setMeta = (key, value) => db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)").run(key, String(value));
+
+let activity = null; // what she's doing right now, for the website ("Reading about ...")
+
+async function wiki(params) {
+  const url = `${WIKI}?${new URLSearchParams({ format: "json", formatversion: "2", ...params })}`;
+  const res = await fetch(url, { headers: BOT_HEADERS, signal: AbortSignal.timeout(15000) });
+  if (!res.ok) throw new Error(`Wikipedia returned ${res.status}`);
+  return res.json();
+}
+
+async function wikipediaPage(title) {
+  const page = (await wiki({
+    action: "query", prop: "extracts", explaintext: "1", exsectionformat: "plain",
+    exchars: String(PAGE_CHARS), redirects: "1", titles: title,
+  })).query.pages[0];
+  return { title: page.title, url: `https://en.wikipedia.org/wiki/${encodeURIComponent(page.title.replace(/ /g, "_"))}`, text: (page.extract || "").trim() };
+}
+
+async function randomWikipediaTitle() {
+  return (await wiki({ action: "query", list: "random", rnnamespace: "0", rnlimit: "1" })).query.random[0].title;
+}
+
+// Only public web pages: never this PC or the home network.
+function isPublicWebUrl(raw) {
+  let url;
+  try { url = new URL(raw); } catch { return false; }
+  if (!/^https?:$/.test(url.protocol)) return false;
+  const host = url.hostname.toLowerCase();
+  if (host === "localhost" || host.endsWith(".local") || host.endsWith(".internal") || !host.includes(".")) return false;
+  if (/^\[|^(0|10|127)\.|^169\.254\.|^172\.(1[6-9]|2\d|3[01])\.|^192\.168\.|^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(host)) return false;
+  if (SKIP_SITES.test(host) || /\.(pdf|zip|exe|mp4|mp3|jpg|png)(\?|$)/i.test(url.pathname)) return false;
+  return true;
+}
+
+const decodeEntities = (s) => s
+  .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
+  .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))
+  .replace(/&nbsp;/g, " ").replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'")
+  .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+
+// The readable text of an HTML page: its paragraphs and headings, without menus and scripts.
+function readable(html) {
+  const title = decodeEntities((html.match(/<meta[^>]+property="og:title"[^>]+content="([^"]+)"/i)?.[1]
+    || html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || "").replace(/\s+/g, " ").trim());
+  let body = html.replace(/<(script|style|noscript|svg|nav|header|footer|aside|form)\b[\s\S]*?<\/\1>/gi, " ");
+  body = body.match(/<article\b[\s\S]*<\/article>/i)?.[0] || body.match(/<main\b[\s\S]*<\/main>/i)?.[0] || body;
+  const blocks = [...body.matchAll(/<(p|h[1-3]|li)\b[^>]*>([\s\S]*?)<\/\1>/gi)]
+    .map((m) => decodeEntities(m[2].replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim())
+    .filter((t) => t.length >= 40);
+  return { title, text: blocks.join("\n\n").slice(0, PAGE_CHARS) };
+}
+
+async function webPage(url) {
+  const res = await fetch(url, { headers: BROWSER_HEADERS, redirect: "follow", signal: AbortSignal.timeout(15000) });
+  if (!res.ok || !(res.headers.get("content-type") || "").includes("text/html")) return null;
+  if (!isPublicWebUrl(res.url)) return null; // a redirect must not lead somewhere private either
+  const html = (await res.text()).slice(0, MAX_PAGE_BYTES);
+  const page = readable(html);
+  return page.text.length >= 400 ? { ...page, url: res.url } : null;
+}
+
+// Web search through Hacker News' public search (Algolia): it welcomes automated use and links
+// out to articles all over the web. (DuckDuckGo blocks automated searches after a few tries.)
+// Every word is optional, so natural phrases like "how fireflies make light" still find things.
+async function webSearch(query) {
+  const params = new URLSearchParams({ query, optionalWords: query, tags: "story", hitsPerPage: "20" });
+  const res = await fetch(`https://hn.algolia.com/api/v1/search?${params}`, { headers: BOT_HEADERS, signal: AbortSignal.timeout(15000) });
+  if (!res.ok) return [];
+  return (await res.json()).hits
+    .filter((h) => h.url && h.title && isPublicWebUrl(h.url))
+    .map((h) => ({ title: h.title, url: h.url, web: true }));
+}
+
+async function wikipediaSearch(query) {
+  return (await wiki({ action: "query", list: "search", srsearch: query, srlimit: "5" })).query.search
+    .map((h) => ({ title: h.title, web: false }));
+}
+
+const STOP_WORDS = new Set(("a an the and or but of in on to for with how why what when where who do does did is are was " +
+  "be been make makes made my your our about from into at by it its this that these those vs").split(" "));
+const keywords = (text) => (text.toLowerCase().match(/[a-z0-9]+/g) || [])
+  .filter((w) => w.length > 2 && !STOP_WORDS.has(w))
+  .map((w) => w.replace(/ies$/, "y").replace(/(es|s|ing|ed)$/, ""));
+
+// How much a result's title is about what she's looking for: share of her keywords it mentions.
+function relevance(title, query) {
+  const wanted = new Set(keywords(query));
+  if (wanted.size === 0) return 0;
+  return new Set(keywords(title).filter((w) => wanted.has(w))).size / wanted.size;
+}
+
+// Something readable about `topic`, from the web or Wikipedia: whichever results' titles are
+// most about it (web pages win ties, now and then she prefers the encyclopedia).
+async function readAbout(topic, alreadyRead) {
+  const [web, encyclopedia] = await Promise.all([
+    webSearch(topic).catch(() => []),
+    wikipediaSearch(topic).catch(() => []),
+  ]);
+  const preferWeb = Math.random() < 0.7;
+  const candidates = [...web, ...encyclopedia]
+    .map((c) => ({ ...c, score: relevance(c.title, topic) + (c.web === preferWeb ? 0.05 : 0) + Math.random() * 0.02 }))
+    .filter((c) => c.score >= 0.3)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5);
+  for (const c of candidates) {
+    const page = await (c.web ? webPage(c.url) : wikipediaPage(c.title)).catch(() => null);
+    if (page && page.text.length >= 200 && !alreadyRead.has(page.url)) return page;
+  }
+  return null;
+}
+
+// Where her mind wants to go first: the thread she left off on, a fresh pick, or chance.
+async function firstStop(topic) {
+  if (topic) return { how: `was sent to look into "${topic}"`, topic };
+  if (Math.random() < RANDOM_CHANCE) return { how: "wandered somewhere random", wander: true };
+  const thread = getMeta("next_curiosity");
+  if (thread && Math.random() < 0.6) return { how: `picked up a thread: "${thread}"`, topic: thread };
+  const answer = await writeInHerVoice(
+    "You have some free time to explore the web on your own. Given what's been on your mind, what " +
+    "do you want to look up right now? Reply with only a short search phrase (2-6 words), nothing else.",
+  );
+  const picked = answer.split("\n")[0].replace(/["'*.]/g, "").trim().slice(0, 80);
+  return picked ? { how: `got curious about "${picked}"`, topic: picked } : { how: "wandered somewhere random", wander: true };
+}
+
+// One roaming session: a few hops, then a journal entry about the trip.
+// `stillFree()` lets her stop early if someone starts talking to her.
+async function roam(topic, stillFree = () => true) {
+  const start = await firstStop(topic);
+  const stops = [];
+  const read = new Set();
+  let next = start.topic;
+  try {
+    for (let hop = 0; hop < HOPS_PER_ROAM && stillFree(); hop++) {
+      activity = next ? `Reading about ${next}` : "Wandering the web";
+      const page = hop === 0 && start.wander ? await wikipediaPage(await randomWikipediaTitle()) : await readAbout(next, read);
+      if (!page || page.text.length < 200) break;
+      read.add(page.url);
+      activity = `Reading "${page.title}"`;
+
+      const thought = await writeInHerVoice(`You're exploring the web on your own and just read this page.
+
+Title: ${page.title}
+From: ${new URL(page.url).hostname}
+
+${page.text}
+
+In 1-3 sentences, in your own voice, note what grabbed you. Then on a new last line write: NEXT: <2-6 word thing you now want to look up>`);
+      next = thought.match(/NEXT:\s*(.+)\s*$/i)?.[1]?.replace(/["'*]/g, "").trim().slice(0, 80) || null;
+      stops.push({ title: page.title, url: page.url, note: thought.replace(/\n?NEXT:.*$/is, "").trim() });
+      if (!next) break;
+    }
+    if (stops.length === 0) return null;
+
+    activity = "Writing about what she found";
+    const entry = await writeInHerVoice(`You spent some free time exploring the web on your own. Here's where you went and what you noted:
+
+${stops.map((s, i) => `(${i + 1}) ${s.title}: ${s.note}`).join("\n")}
+
+Write a short private journal entry about this trip, 70-140 words, in your own voice: what caught you, what surprised you, how it connects to what's been on your mind, and what you're curious about now.`);
+
+    db.prepare("INSERT INTO journal (kind, entry, created, topic, sources) VALUES ('exploration', ?, ?, ?, ?)")
+      .run(entry, Date.now(), stops.map((s) => s.title).join(" → "), JSON.stringify(stops.map(({ title, url }) => ({ title, url }))));
+    setMeta("next_curiosity", next || "");
+    setMeta("last_roam", Date.now());
+    await storeSelfNotes(await notesFromJournal(entry), "exploration");
+    return { how: start.how, stops, entry, next };
+  } finally {
+    activity = null;
+  }
+}
+
+async function roamIfDue(stillFree) {
+  if (Date.now() - Number(getMeta("last_roam") || 0) < ROAM_EVERY_HOURS * 3600000) return null;
+  const today = db.prepare("SELECT COUNT(*) AS n FROM journal WHERE kind = 'exploration' AND created > ?")
+    .get(Date.now() - 24 * 3600000).n;
+  if (today >= MAX_ROAMS_PER_DAY) return null;
+  return roam(undefined, stillFree);
 }
 
 function selfNotes() {
   return db.prepare("SELECT text, source, created FROM self_notes ORDER BY created").all();
 }
 
+// For the website's "What Delta's been exploring": her trips, never her private reflections or diary.
+function explorations(limit = 20) {
+  return {
+    now: activity,
+    trips: db.prepare("SELECT topic, sources, entry, created FROM journal WHERE kind = 'exploration' ORDER BY created DESC LIMIT ?")
+      .all(limit).map((r) => ({ path: r.topic, sources: JSON.parse(r.sources || "[]"), entry: r.entry, created: r.created })),
+  };
+}
+
 module.exports = {
   hello, claim, list, forget, forgetEverything, recall, note, learn, saveExchange, history, clearHistory,
-  personaPrompt, selfSection, startGrowing, reflectIfDue, diaryIfDue, journal, selfNotes,
+  personaPrompt, selfSection, startGrowing, reflectIfDue, diaryIfDue, journal, selfNotes, roam, explorations,
 };

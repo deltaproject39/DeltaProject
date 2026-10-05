@@ -281,6 +281,18 @@
     .danger { background: var(--offline); }
     #memory-status { min-height: 1.2em; margin: 10px 0 0; font-size: 0.85rem; color: var(--muted); }
 
+    /* Roaming dialog */
+    .roam-sheet { width: min(560px, calc(100% - 32px)); }
+    #roam-list { max-height: 60vh; overflow-y: auto; display: grid; gap: 12px; }
+    .roam-now { margin: 0; padding: 8px 12px; border-radius: 10px; background: var(--bg-glow); font-size: 0.9rem; }
+    .trip { padding: 12px 14px; border: 1px solid var(--border); border-radius: 12px; }
+    .trip p { margin: 0; }
+    .trip-when { font-size: 0.75rem; color: var(--muted); }
+    .trip-path { margin-top: 4px !important; font-size: 0.85rem; font-weight: 600; line-height: 1.5; }
+    .trip-path a { color: var(--dawn-2); text-decoration: none; }
+    .trip-path a:hover { text-decoration: underline; }
+    .trip-entry { margin-top: 8px !important; font-size: 0.9rem; line-height: 1.55; white-space: pre-wrap; }
+
     /* Sleepy "z"s floating up while Delta is offline */
     .zzz-layer { position: absolute; top: 16%; left: 62%; pointer-events: none; }
     .zzz-layer span { position: absolute; opacity: 0; color: var(--dawn-1); font-weight: 700; }
@@ -426,6 +438,7 @@
         <p class="tagline" id="status">Waking up...</p>
       </div>
       <div class="header-actions">
+        <button type="button" class="icon-btn" id="roam-toggle" title="Where Delta's been" aria-label="Where Delta's been">🌍</button>
         <button type="button" class="icon-btn" id="memory-toggle" title="What Delta remembers" aria-label="What Delta remembers">🧠</button>
         <button type="button" class="icon-btn" id="voice-toggle">🔊</button>
       </div>
@@ -457,6 +470,16 @@
       </footer>
     </div>
   </main>
+
+  <dialog class="sheet roam-sheet" id="roam-dialog" aria-labelledby="roam-title">
+    <h2 id="roam-title">🌍 Where Delta's been</h2>
+    <p class="sub">In her free time she roams the web on her own, following whatever she's curious about.
+      Nobody tells her where to go. These are her trips and what she made of them.</p>
+    <div id="roam-list"></div>
+    <div class="sheet-actions">
+      <button type="button" class="plain" id="roam-close" style="margin-left:auto">Close</button>
+    </div>
+  </dialog>
 
   <dialog class="sheet" id="memory-dialog" aria-labelledby="memory-title">
     <h2 id="memory-title">🧠 What Delta remembers</h2>
@@ -1350,6 +1373,82 @@
       }
 
       return { hello, loadConversation, get visitor() { return visitor; } };
+    })();
+
+    // ---- Roaming: where Delta has been on her own, and what she's reading right now ----
+    const roaming = (() => {
+      const dialog = document.getElementById("roam-dialog");
+      const listEl = document.getElementById("roam-list");
+      const when = (ms) => new Date(ms).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+
+      async function fetchRoam() {
+        if (!deltaServer) return null;
+        try {
+          const res = await fetch(deltaServer + "/roam", { cache: "no-store" });
+          return res.ok ? await res.json() : null;
+        } catch {
+          return null;
+        }
+      }
+
+      function render(data) {
+        listEl.textContent = "";
+        if (!data) {
+          listEl.innerHTML = '<p class="sub">Delta is offline right now, so her travels are too.</p>';
+          return;
+        }
+        if (data.now) {
+          const live = document.createElement("p");
+          live.className = "roam-now";
+          live.textContent = "Right now: " + data.now + "…";
+          listEl.append(live);
+        }
+        if (data.trips.length === 0) {
+          const empty = document.createElement("p");
+          empty.className = "sub";
+          empty.textContent = "She hasn't gone roaming yet. Give her some quiet time.";
+          listEl.append(empty);
+        }
+        for (const trip of data.trips) {
+          const card = document.createElement("article");
+          card.className = "trip";
+          const meta = document.createElement("p");
+          meta.className = "trip-when";
+          meta.textContent = when(trip.created);
+          const path = document.createElement("p");
+          path.className = "trip-path";
+          trip.sources.forEach((s, i) => {
+            if (i) path.append(" → ");
+            const a = document.createElement("a");
+            a.href = s.url;
+            a.target = "_blank";
+            a.rel = "noopener";
+            a.textContent = s.title;
+            path.append(a);
+          });
+          const entry = document.createElement("p");
+          entry.className = "trip-entry";
+          entry.textContent = trip.entry;
+          card.append(meta, path, entry);
+          listEl.append(card);
+        }
+      }
+
+      document.getElementById("roam-toggle").addEventListener("click", async () => {
+        listEl.innerHTML = '<p class="sub">Loading...</p>';
+        dialog.showModal();
+        render(await fetchRoam());
+      });
+      document.getElementById("roam-close").addEventListener("click", () => dialog.close());
+
+      // While she's out roaming, her status line says what she's reading.
+      setInterval(async () => {
+        if (!deltaServer || engine) return;
+        const data = await fetchRoam();
+        statusEl.textContent = data?.now ? `Online · ${data.now.charAt(0).toLowerCase() + data.now.slice(1)}` : "Online · curious about everything";
+      }, 30000);
+
+      return { fetchRoam };
     })();
 
     // ---- Voice: Delta speaks her replies through the voice server on the owner's PC ----
