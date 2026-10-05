@@ -1081,7 +1081,7 @@
       let ctx = null;
       let analyser = null;
       let samples = null;
-      let working = true;      // false after a failed request, so the mouth falls back to faking it
+      let working = true;      // false after a failed request, so the mouth falls back to faking it until one succeeds
       let generation = 0;      // bumped by stop() so queued sentences from an old reply are dropped
       let fetching = Promise.resolve();
       let playing = Promise.resolve();
@@ -1158,7 +1158,7 @@
       // Queue a sentence: audio is fetched one at a time (easy on the PC) and played in order.
       function say(text) {
         const spoken = text.replace(/[*_#`~>\[\]]/g, "").replace(/\s+/g, " ").trim();
-        if (!active() || !/[a-z0-9]/i.test(spoken)) return;
+        if (!wanted() || !/[a-z0-9]/i.test(spoken)) return;
         const gen = generation;
         const audio = (fetching = fetching.then(() => (gen === generation ? fetchAudio(spoken) : null)));
         playing = playing.then(() => audio).then((clip) => play(clip, gen));
@@ -1171,8 +1171,14 @@
         character.voice(null);
       }
 
+      // Should she try to speak? A failed sentence is skipped, but never silences her for good.
+      function wanted() {
+        return Boolean(enabled && ctx && deltaServer);
+      }
+
+      // Is her voice actually coming through? (If not, her mouth fakes it from the text.)
       function active() {
-        return Boolean(enabled && ctx && deltaServer && working);
+        return wanted() && working;
       }
 
       button.addEventListener("click", () => {
@@ -1183,7 +1189,7 @@
       });
       render();
 
-      return { unlock, say, stop, active };
+      return { unlock, say, stop, active, wanted };
     })();
 
     // "happy:0.93:amusement" + "happy=0.93,sad=0.01,..." -> { emotion, score, label, groups }
@@ -1214,7 +1220,7 @@
     // Speak a finished sentence (the feeling arrives with the audio), or with voice off,
     // just show its feeling.
     function express(sentence) {
-      if (voice.active()) return voice.say(sentence);
+      if (voice.wanted()) return voice.say(sentence);
       readEmotion(sentence).then((f) => {
         if (!f) return;
         character.feel(f.emotion, f.score);
