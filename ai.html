@@ -117,6 +117,17 @@
       background: linear-gradient(135deg, var(--dawn-1), var(--dawn-2));
     }
     .tagline { margin: 2px 0 0; font-size: 0.82rem; color: var(--muted); }
+    .icon-btn {
+      margin-left: auto;
+      padding: 8px 10px;
+      font-size: 1.2rem;
+      line-height: 1;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: transparent;
+      cursor: pointer;
+    }
+    .icon-btn:hover { background: var(--bg-glow); filter: none; }
 
     /* Layout: character stage + conversation */
     .app {
@@ -312,6 +323,7 @@
         <h1>Delta <span class="badge">AI</span></h1>
         <p class="tagline" id="status">Waking up...</p>
       </div>
+      <button type="button" class="icon-btn" id="voice-toggle">🔊</button>
     </div>
   </header>
 
@@ -409,6 +421,7 @@
       let glance = { x: 0, y: 0 };
       let nextGlance = 0;
       let wantWave = false;
+      let voiceLevel = null; // loudness of her speech, or null when she isn't speaking aloud
       // Filled in once the model loads; until then a wave request is remembered.
       const gestureApi = { wave: () => { wantWave = true; }, hold: (name) => { gestureApi.held = name; }, held: null };
 
@@ -461,9 +474,15 @@
 
         if (state === "listening") out.happy = 0.25;
         if (state === "talking") {
-          const open = Math.abs(Math.sin(t / 55) * Math.sin(t / 137));
-          out.aa = 0.15 + 0.6 * open;
-          out.oh = 0.3 * Math.abs(Math.sin(t / 90));
+          if (voiceLevel !== null) {
+            // Speaking out loud: open the mouth as wide as the audio is loud.
+            out.aa = clamp(voiceLevel * 1.3, 0, 1);
+            out.oh = clamp(voiceLevel * 0.4, 0, 1);
+          } else {
+            const open = Math.abs(Math.sin(t / 55) * Math.sin(t / 137));
+            out.aa = 0.15 + 0.6 * open;
+            out.oh = 0.3 * Math.abs(Math.sin(t / 90));
+          }
           out.ly += Math.sin(t / 160) * 0.12 * motion;
           out.tilt += Math.sin(t / 700) * 0.6 * motion;
           out.happy = 0.15;
@@ -735,6 +754,7 @@
           listenTimer = setTimeout(() => state === "listening" && set("idle"), 1500);
         },
         wave: () => gestureApi.wave(),
+        voice: (level) => { voiceLevel = level; },
         // Pin one pose, e.g. character.hold("chin"); handy for tweaking poses from the console.
         hold: (name) => gestureApi.hold(name),
         // Called for every streamed piece of a reply; the mouth stops shortly after the words do.
@@ -877,6 +897,123 @@
       for await (const chunk of stream) yield chunk.choices[0]?.delta?.content || "";
     }
 
+    // ---- Voice: Delta speaks her replies through the voice server on the owner's PC ----
+    const voice = (() => {
+      const button = document.getElementById("voice-toggle");
+      let enabled = true;
+      try { enabled = localStorage.getItem("delta-voice") !== "off"; } catch {}
+      let ctx = null;
+      let analyser = null;
+      let samples = null;
+      let working = true;      // false after a failed request, so the mouth falls back to faking it
+      let generation = 0;      // bumped by stop() so queued sentences from an old reply are dropped
+      let fetching = Promise.resolve();
+      let playing = Promise.resolve();
+      let current = null;
+
+      function render() {
+        button.textContent = enabled ? "🔊" : "🔇";
+        button.title = enabled ? "Mute Delta" : "Unmute Delta";
+        button.setAttribute("aria-label", button.title);
+      }
+
+      // Browsers only allow sound after the visitor interacts, so audio starts on their first message.
+      function unlock() {
+        if (ctx) return ctx.resume();
+        ctx = new AudioContext();
+        analyser = ctx.createAnalyser();
+        analyser.fftSize = 1024;
+        analyser.connect(ctx.destination);
+        samples = new Float32Array(analyser.fftSize);
+      }
+
+      // How loud she is right now, 0..1, for the mouth.
+      function loudness() {
+        analyser.getFloatTimeDomainData(samples);
+        let sum = 0;
+        for (const v of samples) sum += v * v;
+        return Math.min(1, Math.sqrt(sum / samples.length) * 5);
+      }
+
+      async function fetchAudio(text) {
+        try {
+          const res = await fetch(deltaServer + "/tts", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text }),
+          });
+          if (!res.ok) throw new Error(res.status);
+          working = true;
+          return await ctx.decodeAudioData(await res.arrayBuffer());
+        } catch {
+          working = false;
+          return null;
+        }
+      }
+
+      function play(buffer, gen) {
+        if (!buffer || gen !== generation || !enabled) return;
+        return new Promise((resolve) => {
+          const source = ctx.createBufferSource();
+          source.buffer = buffer;
+          source.connect(analyser);
+          source.onended = () => {
+            if (current === source) current = null;
+            resolve();
+          };
+          current = source;
+          source.start();
+          (function meter() {
+            if (current !== source) return character.voice(null);
+            character.voice(loudness());
+            character.talk();
+            requestAnimationFrame(meter);
+          })();
+        });
+      }
+
+      // Queue a sentence: audio is fetched one at a time (easy on the PC) and played in order.
+      function say(text) {
+        const spoken = text.replace(/[*_#`~>\[\]]/g, "").replace(/\s+/g, " ").trim();
+        if (!active() || !/[a-z0-9]/i.test(spoken)) return;
+        const gen = generation;
+        const audio = (fetching = fetching.then(() => (gen === generation ? fetchAudio(spoken) : null)));
+        playing = playing.then(() => audio).then((buffer) => play(buffer, gen));
+      }
+
+      function stop() {
+        generation++;
+        if (current) current.stop();
+        current = null;
+        character.voice(null);
+      }
+
+      function active() {
+        return Boolean(enabled && ctx && deltaServer && working);
+      }
+
+      button.addEventListener("click", () => {
+        enabled = !enabled;
+        try { localStorage.setItem("delta-voice", enabled ? "on" : "off"); } catch {}
+        if (enabled) unlock(); else stop();
+        render();
+      });
+      render();
+
+      return { unlock, say, stop, active };
+    })();
+
+    // Splits streamed text into sentences as they complete, so she can start speaking early.
+    function takeSentences(text, flush = false) {
+      const parts = text.split(/(?<=[.!?…])\s+|\n+/);
+      let rest = parts.pop();
+      if (flush || rest.length > 300) {
+        parts.push(rest);
+        rest = "";
+      }
+      return { sentences: parts, rest };
+    }
+
     input.addEventListener("input", () => character.listen());
 
     form.addEventListener("submit", async (e) => {
@@ -887,6 +1024,8 @@
       input.disabled = true;
       sendBtn.disabled = true;
 
+      voice.unlock();
+      voice.stop();
       addMessage("user", text);
       history.push({ role: "user", content: text });
       const bubble = addMessage("delta", null);
@@ -894,14 +1033,21 @@
 
       try {
         let reply = "";
+        let unspoken = "";
         for await (const piece of (deltaServer ? askDelta() : askBrowserModel())) {
           reply += piece;
+          unspoken += piece;
+          const { sentences, rest } = takeSentences(unspoken);
+          sentences.forEach(voice.say);
+          unspoken = rest;
           if (reply) {
             bubble.textContent = reply;
-            character.talk();
+            // With voice on, her mouth follows the audio instead of the text.
+            if (!voice.active()) character.talk();
           }
           scrollDown();
         }
+        takeSentences(unspoken, true).sentences.forEach(voice.say);
         history.push({ role: "assistant", content: reply });
       } catch (err) {
         bubble.textContent = "Hmm, something went wrong: " + err.message;

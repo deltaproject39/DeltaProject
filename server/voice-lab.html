@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Delta Voice Lab</title>
+  <style>
+    :root {
+      --bg: #fbf7f2;
+      --panel: #ffffff;
+      --text: #1d1b26;
+      --muted: #6b6676;
+      --border: #e9e1d6;
+      --dawn-1: #ffb547;
+      --dawn-2: #f2613a;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #12111c;
+        --panel: #1b1928;
+        --text: #f3eff8;
+        --muted: #9c96ab;
+        --border: #2c2940;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      display: flex;
+      justify-content: center;
+      padding: 32px 16px;
+    }
+    main {
+      width: 100%;
+      max-width: 520px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 24px;
+    }
+    h1 { margin: 0 0 4px; font-size: 1.4rem; }
+    .sub { margin: 0 0 24px; color: var(--muted); font-size: 0.9rem; }
+    label { display: block; font-weight: 600; margin: 18px 0 6px; }
+    .row { display: flex; align-items: center; gap: 12px; }
+    .value { min-width: 70px; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+    input[type="range"] { flex: 1; accent-color: var(--dawn-2); }
+    select, textarea {
+      width: 100%;
+      padding: 10px 12px;
+      font: inherit;
+      color: var(--text);
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+    textarea { resize: vertical; min-height: 70px; }
+    .check { display: flex; align-items: center; gap: 8px; font-weight: 400; margin-top: 14px; }
+    .hint { color: var(--muted); font-size: 0.8rem; margin: 4px 0 0; }
+    .buttons { display: flex; gap: 10px; margin-top: 24px; flex-wrap: wrap; }
+    button {
+      padding: 11px 18px;
+      font: inherit;
+      font-weight: 600;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text);
+      cursor: pointer;
+    }
+    button.primary { border: none; color: #fff; background: linear-gradient(135deg, var(--dawn-1), var(--dawn-2)); }
+    button:disabled { opacity: 0.5; cursor: wait; }
+    #status { margin-top: 14px; min-height: 1.3em; color: var(--muted); font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Delta Voice Lab</h1>
+    <p class="sub">Tune Delta's voice, preview it, then save. Only works on this PC.</p>
+
+    <label for="voice">Voice</label>
+    <select id="voice"></select>
+    <p class="hint">af_ = American female, bf_ = British female, am_/bm_ = male.</p>
+
+    <label for="speed">Speed</label>
+    <div class="row">
+      <input type="range" id="speed" min="0.5" max="2" step="0.05">
+      <span class="value" id="speed-value"></span>
+    </div>
+
+    <label for="pitch">Pitch</label>
+    <div class="row">
+      <input type="range" id="pitch" min="-12" max="12" step="0.5">
+      <span class="value" id="pitch-value"></span>
+    </div>
+    <label class="check"><input type="checkbox" id="natural"> Keep natural tone</label>
+    <p class="hint">On: higher/lower but the same person. Off: a younger/older-sounding voice (more "anime" when higher).</p>
+
+    <label for="text">Test sentence</label>
+    <textarea id="text">Hey. I'm Delta. I've only been around since September, so everything's still new. What's your name?</textarea>
+
+    <div class="buttons">
+      <button id="preview">▶ Preview</button>
+      <button id="save" class="primary">Save as Delta's voice</button>
+      <button id="reset">Reset</button>
+    </div>
+    <p id="status"></p>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const status = (text) => { $("status").textContent = text; };
+    let audio = null;
+
+    function current() {
+      return {
+        voice: $("voice").value,
+        speed: Number($("speed").value),
+        pitch: Number($("pitch").value),
+        natural: $("natural").checked,
+      };
+    }
+
+    function show(settings) {
+      $("voice").value = settings.voice;
+      $("speed").value = settings.speed;
+      $("pitch").value = settings.pitch;
+      $("natural").checked = settings.natural;
+      updateLabels();
+    }
+
+    function updateLabels() {
+      $("speed-value").textContent = Number($("speed").value).toFixed(2) + "×";
+      const p = Number($("pitch").value);
+      $("pitch-value").textContent = (p > 0 ? "+" : "") + p + " st";
+    }
+
+    async function init() {
+      const [voices, settings] = await Promise.all([
+        fetch("/voices").then((r) => r.json()),
+        fetch("/settings").then((r) => r.json()),
+      ]);
+      $("voice").innerHTML = voices.map((v) => `<option>${v}</option>`).join("");
+      show(settings);
+    }
+
+    $("speed").addEventListener("input", updateLabels);
+    $("pitch").addEventListener("input", updateLabels);
+
+    $("preview").addEventListener("click", async () => {
+      $("preview").disabled = true;
+      status("Generating...");
+      try {
+        const res = await fetch("/tts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: $("text").value, preview: current() }),
+        });
+        if (!res.ok) throw new Error((await res.json()).error);
+        if (audio) audio.pause();
+        audio = new Audio(URL.createObjectURL(await res.blob()));
+        audio.play();
+        status("");
+      } catch (err) {
+        status("Couldn't generate: " + err.message);
+      }
+      $("preview").disabled = false;
+    });
+
+    $("save").addEventListener("click", async () => {
+      const res = await fetch("/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(current()),
+      });
+      show(await res.json());
+      status("Saved ✓ Delta will use this voice from her next reply.");
+    });
+
+    $("reset").addEventListener("click", () => {
+      show({ voice: "af_heart", speed: 1, pitch: 0, natural: true });
+      status("Reset to defaults (not saved yet).");
+    });
+
+    init().catch(() => status("Can't reach Delta's voice server. Is it running?"));
+  </script>
+</body>
+</html>

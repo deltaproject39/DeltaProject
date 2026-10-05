@@ -1,6 +1,7 @@
 // Gatekeeper: the only thing exposed to the internet through Cloudflare Tunnel.
 // It forwards chat requests to the local Ollama, but only for the Delta model,
-// with size limits and a per-visitor rate limit. Everything else is refused.
+// and speech requests (text only) to Delta's voice server, with size limits and
+// per-visitor rate limits. Everything else is refused.
 // Run: node server/gatekeeper.js
 
 const http = require("http");
@@ -20,19 +21,70 @@ const RATE_LIMIT = 10;              // requests...
 const RATE_WINDOW_MS = 60_000;      // ...per minute, per visitor
 const MAX_CONCURRENT = 2;           // simultaneous generations on the GPU
 
+const TTS = "http://127.0.0.1:8788";
+const MAX_TTS_CHARS = 600;          // about a sentence or two per request
+const TTS_RATE_LIMIT = 40;          // spoken chunks per minute, per visitor
+const MAX_TTS_CONCURRENT = 2;
+
 const hits = new Map();
+const ttsHits = new Map();
 let active = 0;
+let ttsActive = 0;
 
 function visitorId(req) {
   return req.headers["cf-connecting-ip"] || req.socket.remoteAddress;
 }
 
-function rateLimited(id) {
+function rateLimited(map, id, limit) {
   const now = Date.now();
-  const recent = (hits.get(id) || []).filter((t) => now - t < RATE_WINDOW_MS);
+  const recent = (map.get(id) || []).filter((t) => now - t < RATE_WINDOW_MS);
   recent.push(now);
-  hits.set(id, recent);
-  return recent.length > RATE_LIMIT;
+  map.set(id, recent);
+  return recent.length > limit;
+}
+
+// Collects a small request body; oversized requests are dropped.
+function readBody(req, onDone) {
+  let body = "";
+  let tooBig = false;
+  req.on("data", (chunk) => {
+    body += chunk;
+    if (body.length > MAX_BODY_BYTES) {
+      tooBig = true;
+      req.destroy();
+    }
+  });
+  req.on("end", () => { if (!tooBig) onDone(body); });
+}
+
+async function speak(res, cors, body) {
+  let text = "";
+  try {
+    text = String(JSON.parse(body).text || "").trim().slice(0, MAX_TTS_CHARS);
+  } catch {}
+  if (!text) return send(res, 400, { error: "Bad request" }, cors);
+  if (ttsActive >= MAX_TTS_CONCURRENT) {
+    return send(res, 503, { error: "Delta's voice is busy right now." }, cors);
+  }
+
+  ttsActive++;
+  try {
+    // Only the text is passed on, so visitors can't change Delta's voice settings.
+    const upstream = await fetch(`${TTS}/tts`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    if (!upstream.ok) throw new Error(`Voice server returned ${upstream.status}`);
+    const audio = Buffer.from(await upstream.arrayBuffer());
+    res.writeHead(200, { ...cors, "Content-Type": "audio/wav", "Content-Length": audio.length });
+    res.end(audio);
+  } catch (err) {
+    console.error(err.message);
+    send(res, 502, { error: "Delta's voice is offline." }, cors);
+  } finally {
+    ttsActive--;
+  }
 }
 
 function send(res, status, obj, headers = {}) {
@@ -69,11 +121,18 @@ const server = http.createServer((req, res) => {
     return send(res, 200, { ok: true, model: MODEL }, cors);
   }
 
+  if (req.method === "POST" && req.url === "/tts") {
+    if (rateLimited(ttsHits, visitorId(req), TTS_RATE_LIMIT)) {
+      return send(res, 429, { error: "Slow down a bit and try again in a minute." }, cors);
+    }
+    return readBody(req, (body) => speak(res, cors, body));
+  }
+
   if (req.method !== "POST" || req.url !== "/chat") {
     return send(res, 404, { error: "Not found" }, cors);
   }
 
-  if (rateLimited(visitorId(req))) {
+  if (rateLimited(hits, visitorId(req), RATE_LIMIT)) {
     return send(res, 429, { error: "Slow down a bit and try again in a minute." }, cors);
   }
 

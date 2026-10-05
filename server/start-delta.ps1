@@ -1,4 +1,4 @@
-# Starts Delta for the website: gatekeeper + Cloudflare tunnel, then publishes
+﻿# Starts Delta for the website: voice server + gatekeeper + Cloudflare tunnel, then publishes
 # the new tunnel address to config.json on GitHub Pages.
 # Run: right-click > "Run with PowerShell" (keep the window open while Delta is online).
 
@@ -6,6 +6,9 @@ $ErrorActionPreference = "Stop"
 $repo = Split-Path $PSScriptRoot -Parent
 $cloudflared = "$env:USERPROFILE\cloudflared\cloudflared.exe"
 $log = Join-Path $env:TEMP "delta-tunnel.log"
+
+Write-Host "Starting Delta's voice..."
+$voice = Start-Process "$repo\server\.venv\Scripts\python.exe" -ArgumentList "`"$repo\server\tts_server.py`"" -PassThru -WindowStyle Hidden
 
 Write-Host "Starting gatekeeper..."
 $gatekeeper = Start-Process node -ArgumentList "`"$repo\server\gatekeeper.js`"" -PassThru -WindowStyle Hidden
@@ -24,7 +27,7 @@ for ($i = 0; $i -lt 30 -and -not $url; $i++) {
 }
 if (-not $url) {
     Write-Host "Couldn't get a tunnel address. Check your internet connection." -ForegroundColor Red
-    Stop-Process -Id $gatekeeper.Id, $tunnel.Id -ErrorAction SilentlyContinue
+    Stop-Process -Id $voice.Id, $gatekeeper.Id, $tunnel.Id -ErrorAction SilentlyContinue
     Read-Host "Press Enter to close"
     exit 1
 }
@@ -39,8 +42,9 @@ git -C $repo push
 Write-Host ""
 Write-Host "Delta is online! (site updates in about a minute)" -ForegroundColor Green
 Write-Host "https://deltaproject39.github.io/DeltaProject/ai.html"
+Write-Host "Voice Lab (this PC only): http://localhost:8788/lab"
 Write-Host ""
 Read-Host "Press Enter to take Delta offline"
 
-Stop-Process -Id $gatekeeper.Id, $tunnel.Id -ErrorAction SilentlyContinue
+Stop-Process -Id $voice.Id, $gatekeeper.Id, $tunnel.Id -ErrorAction SilentlyContinue
 Write-Host "Delta is offline."

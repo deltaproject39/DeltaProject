@@ -1,0 +1,3 @@
+# Voice server: large model files and the Python environment stay on this PC only
+server/models/
+server/.venv/
