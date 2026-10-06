@@ -365,6 +365,10 @@
       border: 1px solid var(--border);
       border-bottom-left-radius: 6px;
     }
+    .msg.drawing-msg { display: grid; gap: 8px; }
+    .msg.drawing-msg img { display: block; width: min(320px, 100%); aspect-ratio: 1; border-radius: 10px; }
+    .msg.drawing-msg p { margin: 0; }
+    .drawing-wait { color: var(--muted); font-size: 0.9rem; }
     .row.user .msg {
       background: var(--user-bubble);
       color: var(--user-text);
@@ -1160,7 +1164,9 @@
     function restoreConversation(messages) {
       if (messages.length === 0) return;
       for (const m of messages) {
-        addMessage(m.role === "user" ? "user" : "delta", m.content);
+        const drew = m.role !== "user" && m.content.match(DREW);
+        if (drew) showDrawing(addMessage("delta", ""), { title: drew[1], id: drew[2], thoughts: m.content.replace(DREW, "") });
+        else addMessage(m.role === "user" ? "user" : "delta", m.role === "user" ? m.content : withoutDrawLine(m.content));
         history.push({ role: m.role === "user" ? "user" : "assistant", content: m.content });
       }
       addNotice("— earlier conversation —");
@@ -1381,7 +1387,8 @@
         const err = await res.json().catch(() => ({}));
         throw new Error(err.error || "Delta didn't respond.");
       }
-      // Ollama streams one JSON object per line.
+      // One JSON object per line: pieces of her reply, and at the end maybe { drawing } if she
+      // decided to draw something for you.
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
@@ -1392,9 +1399,62 @@
         const lines = buffer.split("\n");
         buffer = lines.pop();
         for (const line of lines) {
-          if (line.trim()) yield JSON.parse(line).message?.content || "";
+          if (!line.trim()) continue;
+          const msg = JSON.parse(line);
+          if (msg.drawing) startedDrawing = msg.drawing;
+          yield msg.message?.content || "";
         }
       }
+    }
+
+    // ---- Drawings she makes for you in the chat ----
+    let startedDrawing = null;
+    // Her decision to draw ("DRAW: ...") is for her server, not for reading.
+    const withoutDrawLine = (text) => text.replace(/\s*\**DRAW\s*:[^\n]*$/, "");
+    const DREW = /^\(I drew "(.*)" for them, sketch #(\d+)\.\)\s*/;
+
+    // Fills a chat bubble with one of her drawings and what she thought of it.
+    function showDrawing(bubble, sketch) {
+      bubble.textContent = "";
+      bubble.classList.add("drawing-msg");
+      const link = document.createElement("a");
+      link.href = `${deltaServer}/sketches/${sketch.id}.png`;
+      link.target = "_blank";
+      link.rel = "noopener";
+      const img = document.createElement("img");
+      img.src = link.href;
+      img.alt = sketch.title;
+      img.onerror = () => link.replaceWith(Object.assign(document.createElement("em"), { textContent: "(She kept this one to herself.)" }));
+      link.append(img);
+      const title = Object.assign(document.createElement("strong"), { textContent: `🎨 ${sketch.title}` });
+      const thoughts = Object.assign(document.createElement("p"), { textContent: sketch.thoughts });
+      bubble.append(link, title, thoughts);
+      scrollDown();
+    }
+
+    async function waitForDrawing(drawing) {
+      if (drawing.error) return addNotice(drawing.error);
+      const bubble = addMessage("delta", null);
+      bubble.append(Object.assign(document.createElement("span"), { className: "drawing-wait", textContent: " Drawing… (a minute or two)" }));
+      const started = Date.now();
+      while (Date.now() - started < 8 * 60000) {
+        await new Promise((r) => setTimeout(r, 4000));
+        let state = null;
+        try {
+          const res = await fetch(`${deltaServer}/drawing/${drawing.job}`, { cache: "no-store" });
+          if (res.ok) state = await res.json();
+        } catch {}
+        if (!state || state.status === "drawing") continue;
+        if (state.status === "failed") {
+          bubble.textContent = state.error || "The drawing didn't work out this time.";
+          return;
+        }
+        showDrawing(bubble, state.sketch);
+        history.push({ role: "assistant", content: `(I drew "${state.sketch.title}" for them, sketch #${state.sketch.id}.) ${state.sketch.thoughts}` });
+        takeSentences(state.sketch.thoughts, true).sentences.forEach(express);
+        return;
+      }
+      bubble.textContent = "Her brush is taking too long. The drawing will turn up in her 🎨 sketchbook if she finishes it.";
     }
 
     async function* askBrowserModel() {
@@ -1913,6 +1973,7 @@
       try {
         let reply = "";
         let unspoken = "";
+        startedDrawing = null;
         for await (const piece of (deltaServer ? askDelta() : askBrowserModel())) {
           reply += piece;
           unspoken += piece;
@@ -1920,14 +1981,19 @@
           sentences.forEach(express);
           unspoken = rest;
           if (reply) {
-            bubble.textContent = reply;
+            bubble.textContent = withoutDrawLine(reply);
             // With voice on, her mouth follows the audio instead of the text.
             if (!voice.active()) character.talk();
           }
           scrollDown();
         }
-        takeSentences(unspoken, true).sentences.forEach(express);
+        takeSentences(withoutDrawLine(unspoken), true).sentences.forEach(express);
         history.push({ role: "assistant", content: reply });
+        if (startedDrawing) {
+          // She decided to draw for you. (If that was all she "said", there's no empty bubble.)
+          if (!withoutDrawLine(reply).trim()) bubble.closest(".row").remove();
+          waitForDrawing(startedDrawing);
+        }
       } catch (err) {
         bubble.textContent = "Hmm, something went wrong: " + err.message;
         history.pop();

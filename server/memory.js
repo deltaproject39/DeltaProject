@@ -418,12 +418,12 @@ function interruptGrowth() {
   growth = new AbortController();
 }
 
-async function ask(messages, options, format) {
+async function ask(messages, options, format, signal = growth.signal) {
   const res = await fetch(`${OLLAMA}/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ model: NOTE_MODEL, stream: false, ...(format && { format }), options, messages }),
-    signal: growth.signal,
+    signal,
   });
   if (!res.ok) throw new Error(`Ollama returned ${res.status}`);
   return (await res.json()).message.content.trim();
@@ -432,23 +432,26 @@ async function ask(messages, options, format) {
 // Her journal, in her own voice. Uses her personality prompt (plus what she already knows
 // about herself) so the writing is hers.
 // `images` (base64) are pictures she can see along with the task.
-async function writeInHerVoice(task, images) {
+async function writeInHerVoice(task, images, signal) {
   const persona = await personaPrompt();
   const self = await selfSection("");
   return ask(
     [{ role: "system", content: [persona, self].filter(Boolean).join("\n\n") }, { role: "user", content: task, ...(images && { images }) }],
     { temperature: 0.7, num_predict: 260, repeat_penalty: 1.2 },
+    undefined,
+    signal,
   );
 }
 
 const SELF_EXTRACT = `You turn an AI named Delta's private journal into memory notes about HER.
 Return JSON exactly like {"self": ["...", "..."]}: 0-3 short first-person notes ("I ...") capturing her opinions, likes, wishes, curiosities, or views of her own existence that the text clearly expresses. No names or details about other people. If nothing fits, return {"self": []}.`;
 
-async function notesFromJournal(entry) {
+async function notesFromJournal(entry, signal) {
   const parsed = JSON.parse(await ask(
     [{ role: "system", content: SELF_EXTRACT }, { role: "user", content: `Journal: """${entry}"""` }],
     { temperature: 0, num_predict: 160 },
     "json",
+    signal,
   ));
   return (Array.isArray(parsed.self) ? parsed.self : [])
     .filter((n) => typeof n === "string" && n.trim())
@@ -564,16 +567,28 @@ function startGrowing(isIdle) {
     if (!isIdle()) return;
     queue = queue
       .then(async () => {
+        // After anything that happens to her, her sketchbook is within reach: she may want to draw.
+        const perhapsDraw = async () => {
+          if (!isIdle()) return;
+          const drawing = await maybeSketch();
+          if (drawing) console.log(`Delta felt like drawing: "${drawing.title}".`);
+        };
         const reflections = await reflectIfDue();
-        if (reflections) console.log(`Delta reflected on ${reflections} conversation${reflections === 1 ? "" : "s"}.`);
+        if (reflections) {
+          console.log(`Delta reflected on ${reflections} conversation${reflections === 1 ? "" : "s"}.`);
+          await perhapsDraw();
+        }
         if (!isIdle()) return;
         const trip = await roamIfDue(isIdle);
-        if (trip) console.log(`Delta went roaming (${trip.how}): ${trip.stops.map((s) => s.title).join(" → ")}`);
+        if (trip) {
+          console.log(`Delta went roaming (${trip.how}): ${trip.stops.map((s) => s.title).join(" → ")}`);
+          await perhapsDraw();
+        }
         if (!isIdle()) return;
-        const sketch = await sketchIfDue();
-        if (sketch) console.log(`Delta drew "${sketch.title}".`);
-        if (!isIdle()) return;
-        if (await diaryIfDue()) console.log("Delta wrote in her diary.");
+        if (await diaryIfDue()) {
+          console.log("Delta wrote in her diary.");
+          await perhapsDraw();
+        }
         if (!isIdle()) return;
         const review = await reviewPersonality();
         if (review) console.log(`Delta looked back at her week: ${review.changes.map((c) => `${c.trait} ${c.from}→${c.to}`).join(", ") || "no changes"}`);
@@ -801,20 +816,17 @@ async function roamIfDue(stillFree) {
 
 // ---- Her sketchbook ----
 //
-// Now and then in her free time she's asked whether she feels like drawing. She can say no. If
-// she does, she chooses what, in what medium and why, from her mood and what's on her mind. Her
-// "brush" (art_server.py, on this PC) paints it, then she looks at the result (her model can see
-// images) and writes what she honestly thinks of it. A neutral check keeps anything unsuitable off
-// the public wall. Like her other free time, drawing gives way the moment someone needs her.
+// No schedule: whenever something has just happened to her in her free time (she reflected on a
+// conversation, came back from roaming, wrote her diary), her sketchbook is within reach and she
+// decides whether it makes her want to draw. Mostly she can just say no. She also draws when
+// someone asks her in the chat, if she wants to. If she does draw, she chooses what, in what medium
+// and why. Her "brush" (art_server.py, on this PC) paints it, then she looks at the result (her
+// model can see images) and writes what she honestly thinks of it. A neutral check keeps anything
+// unsuitable off the public wall. Free-time drawing gives way the moment someone needs her.
 
 const ART = "http://127.0.0.1:8789";
 const SKETCH_DIR = path.join(__dirname, "sketches"); // her drawings (git-ignored; served by the gatekeeper)
-const MAX_SKETCHES_PER_DAY = 4;
-// How often she's in the mood to draw follows how expressive and playful she is (~6 hours now).
-const sketchEveryHours = () => {
-  const t = personality().traits;
-  return 2 + (1 - (t.expressiveness + t.playfulness) / 200) * 6;
-};
+const MAX_FREE_SKETCHES_PER_DAY = 12; // only so the PC isn't busy drawing all day
 
 const ART_PROMPT = `You write prompts for an image generator (Stable Diffusion). You get an artist's plan for a drawing.
 Return JSON exactly like {"prompt": "..."}: one line, at most 50 words, comma-separated phrases: the concrete subject and setting first, then colours and light, then the medium and style from the plan. Only things that can be seen: turn feelings and ideas into visual metaphors. No words, letters or signatures in the picture. Nothing sexual or gory.`;
@@ -849,7 +861,7 @@ async function paint(prompt, signal) {
 
 // One drawing. Without `idea` she may decide she doesn't feel like it (returns null).
 // With `idea` (asked by you) she draws, taking the suggestion however she likes.
-async function sketch(idea) {
+async function sketch(idea, { signal = growth.signal, inChat = false } = {}) {
   const p = personality();
   const latest = db.prepare(`SELECT kind, topic, entry FROM journal WHERE kind IN ('diary', 'reflection', 'exploration')
     ORDER BY created DESC LIMIT 1`).get();
@@ -868,20 +880,20 @@ WHY: <one or two sentences, in your own voice, about why this, now>`;
 
   activity = "Thinking about what to draw";
   try {
-    const plan = await writeInHerVoice(idea
-      ? `You have a quiet moment and your sketchbook. Someone suggested you draw: "${idea}". Take that however you like: literally, loosely, or as a starting point for something of your own.
+    const plan = idea
+      ? await writeInHerVoice(`${inChat ? "You're talking with someone and decided to draw for them" : "You have a quiet moment and your sketchbook. Someone suggested you draw"}: "${idea}". Take that however you like: literally, loosely, or as a starting point for something of your own.
 
 ${context}
 
 Reply in exactly this form:
-${form}`
-      : `You have a quiet moment to yourself, and a sketchbook. Nobody asked you to draw: it's entirely up to you, and it doesn't have to be about anything you've been reading.
+${form}`, undefined, signal)
+      : await writeInHerVoice(`You have a quiet moment to yourself, and a sketchbook. Nobody asked you to draw: it's entirely up to you, and it doesn't have to be about anything you've been reading.
 
 ${context}
 
 Do you feel like drawing something right now? If not, reply with only: NO
 If you do, reply in exactly this form:
-${form}`);
+${form}`, undefined, signal);
 
     const field = (name) => plan.match(new RegExp(`^\\W*${name}\\W*:\\s*(.+)$`, "im"))?.[1]?.replace(/^["*]+|["*]+$/g, "").trim();
     const [title, what, medium, why] = ["TITLE", "DRAW", "MEDIUM", "WHY"].map(field);
@@ -894,21 +906,23 @@ ${form}`);
       [{ role: "system", content: ART_PROMPT }, { role: "user", content: `Plan: ${what}\nMedium: ${medium || "pencil sketch"}` }],
       { temperature: 0.2, num_predict: 120 },
       "json",
+      signal,
     ));
     if (typeof prompt !== "string" || !prompt.trim()) throw new Error("No prompt for her brush");
 
     activity = `Drawing "${title.slice(0, 60)}"`;
-    const png = await paint(prompt.trim().slice(0, 600), growth.signal);
+    const png = await paint(prompt.trim().slice(0, 600), signal);
     const image = png.toString("base64");
 
     activity = `Looking at her drawing "${title.slice(0, 60)}"`;
     const thoughts = await writeInHerVoice(`You just finished this drawing in your sketchbook (it's the picture attached). You meant to draw: "${what}" in ${medium || "pencil"}, because: "${why || "you felt like it"}".
 
-Look at what actually came out. In 2-4 sentences, in your own voice: what do you honestly think of it? Whether it came out the way you meant, what you like or don't, what it makes you feel. Don't describe it back like a caption.`, [image]);
+Look at what actually came out. In 2-4 sentences, in your own voice: what do you honestly think of it? Whether it came out the way you meant, what you like or don't, what it makes you feel. Don't describe it back like a caption.`, [image], signal);
     const check = JSON.parse(await ask(
       [{ role: "system", content: SAFETY_CHECK }, { role: "user", content: "Check this picture.", images: [image] }],
       { temperature: 0, num_predict: 30 },
       "json",
+      signal,
     ));
 
     const created = Date.now();
@@ -920,17 +934,17 @@ Look at what actually came out. In 2-4 sentences, in your own voice: what do you
       .run(`${why ? `${why}\n\n` : ""}${thoughts}`, created, title.slice(0, 100), JSON.stringify({ sketch: Number(id) }));
     setMeta("last_sketch", created);
     setMeta("draw_requests", "[]"); // she's seen them; whether she drew one was up to her
-    await storeSelfNotes(await notesFromJournal(thoughts), "sketch");
+    await storeSelfNotes(await notesFromJournal(thoughts, signal), "sketch");
     return { id: Number(id), title, why, thoughts, prompt, public: !check.unsafe };
   } finally {
     activity = null;
   }
 }
 
-async function sketchIfDue() {
-  if (Date.now() - Number(getMeta("last_sketch") || 0) < sketchEveryHours() * 3600000) return null;
+// Something just happened to her: does it make her want to draw? (Her choice; usually no.)
+async function maybeSketch() {
   const today = db.prepare("SELECT COUNT(*) AS n FROM sketches WHERE created > ?").get(Date.now() - 24 * 3600000).n;
-  if (today >= MAX_SKETCHES_PER_DAY) return null;
+  if (today >= MAX_FREE_SKETCHES_PER_DAY) return null;
   const brush = await fetch(`${ART}/health`, { signal: AbortSignal.timeout(2000) }).catch(() => null);
   if (!brush?.ok) return null; // her brush isn't running: no drawing today
   return sketch();
@@ -1056,16 +1070,70 @@ function lifeSection() {
       : "You haven't seen yourself yet, so if asked how you look, say you don't know yet."),
     "- You have a sketchbook. In your free time, when you feel like it, you draw: you decide what, your brush paints it,",
     "  and you look at what came out. People can see your finished drawings with the 🎨 button.",
-    "  You can NOT make a picture during a conversation. Never write an [Image ...] or describe a picture as if you",
-    "  were showing one. If someone asks you to draw something, say plainly you can't draw right now in the chat, but",
-    "  you'll keep the idea for your sketchbook, and whether you draw it is up to you. (They can already see your",
-    "  body: it's right there on the page next to the chat.)",
+    "  You can also draw for someone you're talking to, if they ask and you want to. To do it, say so in your reply,",
+    "  then put this as the very last line: DRAW: <what you'll draw, in a few words>",
+    "  Your brush then takes a minute or two, and the drawing appears in the chat with your thoughts on it. Until",
+    "  then you haven't seen it: never describe the finished picture or write an [Image ...]. You can also say no.",
+    "  Only use DRAW when someone asked you to draw something.",
     ...(drawings.length
       ? ["  Your latest drawings: " + drawings.map((d) => `"${d.title}" (you thought: ${d.thoughts.replace(/\s+/g, " ").slice(0, 120)}...)`).join("; ")]
       : ["  You haven't drawn anything yet."]),
     "- In your free time you also roam the web, reading whatever you're curious about (the 🌍 button shows where you went).",
   ].join("\n");
 }
+
+// ---- Drawing for someone in the chat ----
+// She decides in her reply (a last line "DRAW: ..."); the gatekeeper starts the drawing and the
+// page checks back until it's done. One at a time, a few per visitor per hour. It runs outside her
+// free-time queue, so other visitors arriving don't cancel it.
+
+const CHAT_DRAWINGS_PER_HOUR = 3;
+const CHAT_DRAWINGS_PER_DAY = 30;
+const drawJobs = new Map(); // job id -> { visitor, status: "drawing" | "done" | "failed", sketch?, error?, started }
+let drawingInChat = false;
+
+function startChatDrawing(visitor, idea) {
+  if (drawingInChat) return { error: "She's already drawing something. Ask again in a minute or two." };
+  const hourAgo = Date.now() - 3600000;
+  const recent = [...drawJobs.values()].filter((j) => j.started > hourAgo);
+  if (recent.filter((j) => j.visitor === visitor).length >= CHAT_DRAWINGS_PER_HOUR) {
+    return { error: "She's drawn a lot for you this hour. Give her brush a rest." };
+  }
+  const today = db.prepare("SELECT COUNT(*) AS n FROM sketches WHERE created > ?").get(Date.now() - 86400000).n;
+  if (today >= CHAT_DRAWINGS_PER_DAY) return { error: "She's drawn plenty today. Ask her again tomorrow." };
+
+  const id = crypto.randomUUID();
+  const job = { visitor, status: "drawing", started: Date.now() };
+  drawJobs.set(id, job);
+  for (const [key, old] of drawJobs) if (old.started < Date.now() - 86400000) drawJobs.delete(key);
+  drawingInChat = true;
+  sketch(idea, { signal: AbortSignal.timeout(10 * 60000), inChat: true })
+    .then((s) => {
+      if (!s) throw new Error("She didn't end up drawing it.");
+      job.sketch = { id: s.id, title: s.title, thoughts: s.thoughts, public: s.public };
+      job.status = "done";
+      // Part of the conversation, so she remembers drawing it for them.
+      if (isKnown(visitor)) {
+        db.prepare("INSERT INTO messages (visitor, role, content, created) VALUES (?, 'assistant', ?, ?)")
+          .run(visitor, `(I drew "${s.title}" for them, sketch #${s.id}.) ${s.thoughts}`, Date.now());
+      }
+    })
+    .catch((err) => {
+      console.error("Chat drawing:", err.message);
+      job.status = "failed";
+      job.error = /brush/.test(err.message) ? "Her brush isn't available right now." : "The drawing didn't work out this time.";
+    })
+    .finally(() => { drawingInChat = false; });
+  return { job: id };
+}
+
+function chatDrawing(id) {
+  const job = drawJobs.get(String(id));
+  if (!job) return null;
+  return { status: job.status, sketch: job.sketch, error: job.error };
+}
+
+const isDrawingInChat = () => drawingInChat;
 
 function selfNotes() {
   return db.prepare("SELECT text, source, created FROM self_notes ORDER BY created").all();
@@ -1406,4 +1474,5 @@ module.exports = {
   personalityReport, reviewPersonality, reviewNow, undoLastChange, setPinned, behavior,
   sketchNow, sketches, sketchFile, setSketchPublic, stopDrawing,
   mirrorNow, appearance, noteDrawRequest, mirrorImages, asksAboutLooks,
+  startChatDrawing, chatDrawing, isDrawingInChat,
 };

@@ -307,6 +307,50 @@ function sendSketch(res, file, cors) {
   fs.createReadStream(file).pipe(res);
 }
 
+// Passes her reply text on as it streams, except a line starting "DRAW:" (her decision to draw):
+// a line that might be becoming one is held back until it's clear. end() returns what she'll draw.
+function drawLineFilter(emit) {
+  const MARK = "DRAW:";
+  let line = "";        // the current line, held back while it could still be the DRAW line
+  let held = true;      // false once the current line clearly isn't one
+  let idea = null;
+  let out = "";
+  const strip = (s) => s.replace(/^[\s*_>#-]+/, "");
+  const couldBe = (s) => {
+    const bare = strip(s).toUpperCase();
+    return bare.length < MARK.length ? MARK.startsWith(bare) : /^DRAW\s*:/.test(bare);
+  };
+  const close = (text) => {
+    const found = strip(text).match(/^DRAW\s*:\s*(.+)/i);
+    if (found) idea = found[1].replace(/[*_"]+/g, "").trim().slice(0, 200) || idea;
+    else out += text;
+  };
+  const flush = () => {
+    if (out) emit(out);
+    out = "";
+  };
+  return {
+    add(piece) {
+      for (const ch of piece) {
+        if (!held) {
+          out += ch;
+          if (ch === "\n") { held = true; line = ""; }
+          continue;
+        }
+        line += ch;
+        if (ch === "\n") { close(line); line = ""; }
+        else if (!couldBe(line)) { out += line; line = ""; held = false; }
+      }
+      flush();
+    },
+    end() {
+      if (line) close(line);
+      flush();
+      return idea;
+    },
+  };
+}
+
 function send(res, status, obj, headers = {}) {
   res.writeHead(status, { "Content-Type": "application/json", ...headers });
   res.end(JSON.stringify(obj));
@@ -351,6 +395,13 @@ const server = http.createServer((req, res) => {
   // Her public "roaming" feed: where she's been on her own and what she thought (no visitor data).
   if (req.method === "GET" && req.url === "/roam") {
     return send(res, 200, memory.explorations(), cors);
+  }
+
+  // How a drawing she started in the chat is coming along.
+  const job = req.method === "GET" && req.url.match(/^\/drawing\/([0-9a-f-]{36})$/);
+  if (job) {
+    const state = memory.chatDrawing(job[1]);
+    return state ? send(res, 200, state, cors) : send(res, 404, { error: "Not found" }, cors);
   }
 
   // Her public sketchbook: the drawings she made in her free time and what she thought of them.
@@ -498,21 +549,28 @@ const server = http.createServer((req, res) => {
       });
       if (!upstream.ok) throw new Error(`Ollama returned ${upstream.status}`);
 
-      // Pass Ollama's stream (one JSON object per line) straight through, keeping a copy of her
-      // reply so the exchange can be saved, then let her take notes on what the visitor said.
+      // Stream her reply on (one JSON object per line), keeping a copy so the exchange can be
+      // saved, then let her take notes on what the visitor said. If she decides to draw, her reply
+      // ends with a line "DRAW: ..." that the visitor doesn't see: it starts her brush instead.
       res.writeHead(200, { ...cors, "Content-Type": "application/x-ndjson" });
       const decoder = new TextDecoder();
+      const shown = drawLineFilter((text) => res.write(JSON.stringify({ message: { content: text } }) + "\n"));
       let pending = "";
       let reply = "";
       for await (const chunk of upstream.body) {
-        res.write(chunk);
         pending += decoder.decode(chunk, { stream: true });
         const lines = pending.split("\n");
         pending = lines.pop();
         for (const line of lines) {
-          try { reply += JSON.parse(line).message?.content || ""; } catch {}
+          let piece = "";
+          try { piece = JSON.parse(line).message?.content || ""; } catch {}
+          reply += piece;
+          shown.add(piece);
         }
       }
+      // (Now and then she puts it at the end of a sentence instead of on its own line.)
+      const idea = shown.end() || reply.match(/DRAW\s*:\s*([^\n]+?)\s*$/)?.[1]?.replace(/[*_"]+/g, "").trim().slice(0, 200);
+      if (idea) res.write(JSON.stringify({ drawing: memory.startChatDrawing(visitor, idea) }) + "\n");
       res.end();
       memory.saveExchange(visitor, lastUser, reply);
       memory.learn(visitor, lastUser);
@@ -529,7 +587,7 @@ const server = http.createServer((req, res) => {
 
 // She reflects, roams and writes her diary in the background, only while she's awake and nobody
 // is waiting on a reply.
-memory.startGrowing(() => active === 0 && !closing && !memory.sleepState().asleep);
+memory.startGrowing(() => active === 0 && !closing && !memory.sleepState().asleep && !memory.isDrawingInChat());
 
 // Waking up: if she went to sleep because the server was closed, she wakes now. If you put her to
 // sleep yourself, she stays asleep until you wake her (node server/delta-self.js wake).
