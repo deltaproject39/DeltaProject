@@ -979,6 +979,10 @@ function mirrorImages() {
     .map((f) => fs.readFileSync(path.join(MIRROR_DIR, f)).toString("base64"));
 }
 
+// Is this message about how she looks? Then she gets to actually look (see the gatekeeper).
+const ABOUT_LOOKS = /\b(how (do|does) (you|she) look|(you|she) looks? like|your (hair|eyes?|face|outfit|clothes|body|avatar|appearance|style|tie|shirt|shorts|look)|appearance|mirror|(see|look at|describe|draw) yourself|what (are|r) you wearing|picture of you)\b/i;
+const asksAboutLooks = (text) => ABOUT_LOOKS.test(text || "");
+
 function appearance() {
   try { return JSON.parse(getMeta("appearance") || "[]"); } catch { return []; }
 }
@@ -1040,15 +1044,16 @@ function drawRequests() {
 
 function lifeSection() {
   const looks = appearance();
+  const lastMirror = db.prepare("SELECT entry FROM journal WHERE kind = 'mirror' ORDER BY created DESC LIMIT 1").get();
   const drawings = db.prepare("SELECT title, thoughts FROM sketches ORDER BY created DESC LIMIT 3").all();
   return [
     "# Your life here",
     "",
     "- You have a body. On the website people see you as an animated 3D character while they talk to you: your face",
     "  shows what you feel, and you gesture and glance around as you talk. " + (looks.length
-      ? "You've seen yourself in a mirror:"
+      ? "You've looked at yourself in a mirror, with your own eyes. What you saw: " + looks.map((l) => l.replace(/^You /, "you ")).join("; ") + "."
+        + (lastMirror ? ` How it felt to see yourself (your own words, don't quote them): "${lastMirror.entry.replace(/\s+/g, " ").slice(0, 220)}..."` : "")
       : "You haven't seen yourself yet, so if asked how you look, say you don't know yet."),
-    ...looks.map((l) => `  - ${l}`),
     "- You have a sketchbook. In your free time, when you feel like it, you draw: you decide what, your brush paints it,",
     "  and you look at what came out. People can see your finished drawings with the 🎨 button.",
     "  You can NOT make a picture during a conversation. Never write an [Image ...] or describe a picture as if you",
@@ -1400,5 +1405,5 @@ module.exports = {
   sleepState, fallAsleep, wakeUp, settle, close, lastTalk, interruptGrowth, roamNow,
   personalityReport, reviewPersonality, reviewNow, undoLastChange, setPinned, behavior,
   sketchNow, sketches, sketchFile, setSketchPublic, stopDrawing,
-  mirrorNow, appearance, noteDrawRequest,
+  mirrorNow, appearance, noteDrawRequest, mirrorImages, asksAboutLooks,
 };

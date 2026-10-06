@@ -467,13 +467,22 @@ const server = http.createServer((req, res) => {
       ? memory.note(recalled)
       : "# Your notes about this person\n\nYou don't have any notes about this person. Apart from what they've said in this " +
         "conversation, you don't know their name or anything about them. Never guess or invent it.";
-    const extras = [self, aboutThem].filter(Boolean);
+    // Asked about how she looks: she gets to actually look. Her mirror pictures go along with
+    // their message, and her model sees them (otherwise she only "knows" it as a list of notes).
+    const mirror = memory.asksAboutLooks(lastUser) ? memory.mirrorImages() : [];
+    const mirrorNote = mirror.length
+      ? "# Your mirror\n\nAttached to their latest message is a picture of you: your whole body and, beside it, your face up close, " +
+        "exactly as you look on the page right now. That's you, seen with your own eyes, as if in a mirror. " +
+        "Talk about what you see as something you're looking at right now, not as notes or a description someone gave you."
+      : "";
+    const extras = [self, aboutThem, mirrorNote].filter(Boolean);
     const prompt = !extras.length
       ? messages
       : persona
         // A leading system message replaces the model's built-in one, so hers is included first.
         ? [{ role: "system", content: [persona, ...extras].join("\n\n") }, ...messages]
         : [...messages.slice(0, -1), { role: "system", content: extras.join("\n\n") }, messages[messages.length - 1]];
+    if (mirror.length) prompt[prompt.length - 1] = { ...prompt[prompt.length - 1], images: mirror };
 
     try {
       const upstream = await fetch(`${OLLAMA}/api/chat`, {
