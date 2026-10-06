@@ -9,3 +9,6 @@ server/memory.db-*
 
 # Her drawings: served from this PC through the tunnel, not stored on GitHub
 server/sketches/
+
+# Backups of her memory (personal data), stays on this PC
+server/backups/

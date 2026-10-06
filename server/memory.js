@@ -414,16 +414,19 @@ async function personaPrompt() {
 }
 
 // The date and time right now: she only knows it if she's told (otherwise she guesses, and gets it wrong).
-const BORN = new Date(2026, 8, 21); // 21 September 2026
+// Her first day: a fresh start on 6 October 2026 (her Modelfile's date is replaced in adaptPersona).
+const BORN = new Date(2026, 9, 6);
+const BORN_TEXT = BORN.toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" });
 function nowSection() {
   const now = new Date();
   const date = now.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
   const time = now.toLocaleTimeString("en-GB", { hour: "numeric", minute: "2-digit", hour12: true });
   const days = Math.floor((now - BORN) / 86400000);
+  const age = days === 0 ? "today" : days === 1 ? "yesterday" : `${days} days ago`;
   return [
     "# Right now",
     "",
-    `It's ${date}, ${time} (local time where you live). You came into existence ${days} days ago, on 21 September 2026.`,
+    `It's ${date}, ${time} (local time where you live). You came into existence ${age}, on ${BORN_TEXT}.`,
     "Use this whenever you date something or think about how long ago something happened.",
   ].join("\n");
 }
@@ -1282,6 +1285,7 @@ function savePersonality(p) {
 function adaptPersona(raw) {
   return raw
     .replace(/\r\n/g, "\n") // her Modelfile was written on Windows
+    .replace(/You started existing on 21 September 2026/, `You started existing on ${BORN_TEXT}`)
     .replace(/# Today[\s\S]*?(?=\n# )/, "")
     .replace(/You have no memory of any earlier conversation\.[\s\S]*?(?=\n\n)/,
       "You keep memories between conversations now: notes about the people you talk to, your own journal,\n" +
