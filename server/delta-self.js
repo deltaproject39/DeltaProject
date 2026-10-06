@@ -7,10 +7,35 @@
 //        node server/delta-self.js roam "deep sea creatures"   ...or send her somewhere to start
 //        node server/delta-self.js sleep      put her to sleep (no chatting or roaming) until you wake her
 //        node server/delta-self.js wake       wake her up
+//        node server/delta-self.js who        her personality: traits, likes, interests, today, recent changes
+//        node server/delta-self.js review     have her look back and decide how she's changed, now
+//
+// Easier: open http://localhost:8787/owner on this PC for all of this in your browser.
 
 const memory = require("./memory");
 
 const when = (ms) => new Date(ms).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" });
+
+function showPersonality() {
+  const p = memory.personalityReport();
+  console.log("\n=== Who Delta is right now ===\n");
+  for (const t of p.traits) {
+    const bar = "#".repeat(Math.round(t.value / 5)).padEnd(20, ".");
+    const drift = t.value - t.start;
+    console.log(`  ${t.name.padEnd(15)} ${bar} ${String(t.value).padStart(3)}${drift ? ` (${drift > 0 ? "+" : ""}${drift} since start)` : ""}${t.pinned ? "  [pinned]" : ""}`);
+  }
+  console.log(`\n  Today: ${p.today}`);
+  if (p.likes.length) console.log(`  Likes: ${p.likes.join(", ")}`);
+  if (p.dislikes.length) console.log(`  Dislikes: ${p.dislikes.join(", ")}`);
+  if (p.interests.length) console.log(`  Drawn to: ${p.interests.join(", ")}`);
+  if (p.habits.length) console.log(`  Habits: ${p.habits.join("; ")}`);
+  const last = p.history.find((h) => h.changes.length);
+  if (last) {
+    console.log(`\n  Last change (${when(last.created)})${last.undone ? " [undone]" : ""}:`);
+    for (const c of last.changes) console.log(`    ${c.trait} ${c.from} → ${c.to}: "${c.why}"`);
+  }
+  console.log();
+}
 
 function show() {
   const notes = memory.selfNotes();
@@ -38,6 +63,16 @@ function show() {
   } else if (command === "wake") {
     const was = memory.wakeUp();
     console.log(was.asleep ? "Delta is awake." : "She was already awake.");
+    process.exit(0);
+  } else if (command === "who") {
+    showPersonality();
+    process.exit(0);
+  } else if (command === "review") {
+    console.log("Delta is looking back at who she's been... (a minute or two)");
+    const review = await memory.reviewPersonality(true);
+    if (!review) console.log("She has nothing new to look back on yet.");
+    else console.log(`\n${review.thoughts}\n`);
+    showPersonality();
     process.exit(0);
   } else if (command === "reflect") {
     console.log("Delta is reflecting... (this takes a little while)");

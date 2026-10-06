@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Who is Delta</title>
+  <style>
+    :root {
+      --bg: #fbf7f2;
+      --panel: #ffffff;
+      --text: #1d1b26;
+      --muted: #6b6676;
+      --border: #e9e1d6;
+      --dawn-1: #ffb547;
+      --dawn-2: #f2613a;
+      --glow: rgba(242, 97, 58, 0.10);
+      --up: #2f9e6e;
+      --down: #d9534f;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #12111c;
+        --panel: #1b1928;
+        --text: #f3eff8;
+        --muted: #9c96ab;
+        --border: #2c2940;
+        --glow: rgba(242, 97, 58, 0.16);
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      line-height: 1.5;
+    }
+    main { max-width: 900px; margin: 0 auto; padding: 24px 16px 64px; display: grid; gap: 16px; }
+    header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    h1 { margin: 0; font-size: 1.5rem; }
+    h2 { margin: 0 0 10px; font-size: 1.05rem; }
+    .state { color: var(--muted); font-size: 0.9rem; }
+    .spacer { flex: 1; }
+    section { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 16px 18px; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    button {
+      padding: 7px 14px;
+      font: inherit;
+      font-size: 0.88rem;
+      font-weight: 600;
+      color: var(--text);
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      cursor: pointer;
+    }
+    button.primary { color: #fff; border: none; background: linear-gradient(135deg, var(--dawn-1), var(--dawn-2)); }
+    button:disabled { opacity: 0.5; cursor: wait; }
+    input { padding: 7px 12px; font: inherit; font-size: 0.9rem; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 999px; }
+    .today { font-size: 1.02rem; font-style: italic; margin: 0; }
+    .trait { display: grid; grid-template-columns: 8.5em 1fr 4.5em 4.5em; gap: 10px; align-items: center; padding: 6px 0; }
+    .trait .name { font-weight: 600; text-transform: capitalize; }
+    .trait .words { grid-column: 2 / 5; font-size: 0.82rem; color: var(--muted); margin-top: -4px; }
+    .bar { position: relative; height: 8px; border-radius: 999px; background: var(--border); }
+    .bar .fill { position: absolute; inset: 0 auto 0 0; border-radius: inherit; background: linear-gradient(90deg, var(--dawn-1), var(--dawn-2)); }
+    .bar .start { position: absolute; top: -4px; bottom: -4px; width: 2px; background: var(--text); opacity: 0.45; }
+    .value { font-variant-numeric: tabular-nums; font-weight: 600; }
+    .drift.up { color: var(--up); }
+    .drift.down { color: var(--down); }
+    .pin { padding: 3px 10px; font-size: 0.78rem; }
+    .pin.on { border-color: var(--dawn-2); color: var(--dawn-2); }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 12px; }
+    .chip { padding: 3px 10px; border-radius: 999px; background: var(--glow); font-size: 0.85rem; }
+    .label { font-size: 0.8rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+    .change { border-top: 1px solid var(--border); padding: 10px 0; }
+    .change:first-of-type { border-top: none; }
+    .change.undone { opacity: 0.55; }
+    .when { font-size: 0.78rem; color: var(--muted); }
+    details summary { cursor: pointer; color: var(--muted); font-size: 0.85rem; }
+    .entry { border-top: 1px solid var(--border); padding: 12px 0; white-space: pre-wrap; }
+    .entry:first-of-type { border-top: none; }
+    .kind { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 0.72rem; font-weight: 700; background: var(--glow); margin-right: 6px; }
+    .tabs button.on { border-color: var(--dawn-2); color: var(--dawn-2); }
+    ul.notes { margin: 0; padding-left: 18px; }
+    ul.notes li { margin: 3px 0; }
+    #status { min-height: 1.3em; color: var(--muted); font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Who is Delta</h1>
+      <span class="state" id="state"></span>
+      <span class="spacer"></span>
+      <button id="sleep-toggle">…</button>
+    </header>
+    <p id="status" role="status"></p>
+
+    <section>
+      <h2>Today</h2>
+      <p class="today" id="today"></p>
+    </section>
+
+    <section>
+      <h2>Her traits</h2>
+      <div id="traits"></div>
+      <p class="when">The thin line marks where each trait started. A pinned trait doesn't change in her reviews.</p>
+      <div class="row">
+        <button class="primary" id="review">Have her look back now</button>
+        <button id="undo">Undo her last change</button>
+        <span class="when" id="next-review"></span>
+      </div>
+    </section>
+
+    <section>
+      <h2>What she's into</h2>
+      <div id="lists"></div>
+    </section>
+
+    <section>
+      <h2>How she's changed</h2>
+      <div id="history"></div>
+    </section>
+
+    <section>
+      <h2>Send her roaming</h2>
+      <div class="row">
+        <input id="roam-topic" placeholder="A topic, or leave empty to let her choose">
+        <button id="roam">Go</button>
+      </div>
+    </section>
+
+    <section>
+      <h2>What she thinks about herself</h2>
+      <ul class="notes" id="self-notes"></ul>
+    </section>
+
+    <section>
+      <h2>Her journal</h2>
+      <div class="row tabs" id="tabs"></div>
+      <div id="journal"></div>
+    </section>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const when = (ms) => new Date(ms).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+    const status = (text) => { $("status").textContent = text; };
+    let data = null;
+    let tab = "all";
+
+    async function api(path, body) {
+      const res = await fetch(path, body === undefined ? {} : { method: "POST", body: JSON.stringify(body) });
+      const json = await res.json();
+      if (!res.ok || json.error) throw new Error(json.error || "Something went wrong");
+      return json;
+    }
+
+    function el(tag, props = {}, ...children) {
+      const node = Object.assign(document.createElement(tag), props);
+      node.append(...children.filter((c) => c !== null && c !== undefined));
+      return node;
+    }
+
+    function render() {
+      const asleep = data.sleep.asleep;
+      $("state").textContent = asleep ? "💤 Asleep" : data.now ? `🌍 ${data.now}` : "● Awake";
+      $("sleep-toggle").textContent = asleep ? "Wake her up" : "Put her to sleep";
+      $("today").textContent = data.today;
+      $("next-review").textContent = `Her next weekly look back: around ${when(data.nextReview)}`;
+
+      $("traits").replaceChildren(...data.traits.map((t) => {
+        const drift = t.value - t.start;
+        const fill = el("span", { className: "fill" });
+        fill.style.width = t.value + "%";
+        const start = el("span", { className: "start", title: `Started at ${t.start}` });
+        start.style.left = t.start + "%";
+        const pin = el("button", { className: "pin" + (t.pinned ? " on" : ""), textContent: t.pinned ? "📌 Pinned" : "Pin" });
+        pin.addEventListener("click", async () => {
+          await api("/owner/api/pin", { trait: t.name, pinned: !t.pinned });
+          load();
+        });
+        return el("div", { className: "trait" },
+          el("span", { className: "name", textContent: t.name }),
+          el("span", { className: "bar" }, fill, start),
+          el("span", { className: "value" }, `${t.value} `, drift ? el("span", { className: "drift " + (drift > 0 ? "up" : "down"), textContent: (drift > 0 ? "+" : "") + drift }) : null),
+          pin,
+          el("span", { className: "words", textContent: t.words }));
+      }));
+
+      const lists = [["Likes", data.likes], ["Dislikes", data.dislikes], ["Drawn to", data.interests], ["Habits", data.habits]];
+      $("lists").replaceChildren(...lists.flatMap(([label, items]) => [
+        el("div", { className: "label", textContent: label }),
+        el("div", { className: "chips" }, ...(items.length ? items.map((i) => el("span", { className: "chip", textContent: i })) : [el("span", { className: "when", textContent: "Nothing yet" })])),
+      ]));
+
+      const reviews = data.history;
+      $("history").replaceChildren(...(reviews.length ? reviews.map((h) => el("div", { className: "change" + (h.undone ? " undone" : "") },
+        el("div", { className: "when", textContent: when(h.created) + (h.undone ? " · undone" : "") }),
+        ...(h.changes.length
+          ? h.changes.map((c) => el("div", {}, el("strong", { textContent: `${c.trait} ${c.from} → ${c.to}` }), ` — "${c.why}"`))
+          : [el("div", { textContent: "She felt nothing about her had changed." })]),
+        el("details", {}, el("summary", { textContent: "What she wrote" }), el("p", { textContent: h.note || "" })),
+      )) : [el("p", { className: "when", textContent: "No changes yet. She looks back about once a week." })]));
+
+      $("self-notes").replaceChildren(...[...data.selfNotes].reverse().map((n) =>
+        el("li", {}, n.text, " ", el("span", { className: "when", textContent: `(${n.source}, ${when(n.created)})` }))));
+
+      const kinds = { all: "All", diary: "Diary", reflection: "Reflections", exploration: "Roaming", review: "Looking back" };
+      $("tabs").replaceChildren(...Object.entries(kinds).map(([k, label]) => {
+        const b = el("button", { className: k === tab ? "on" : "", textContent: label });
+        b.addEventListener("click", () => { tab = k; render(); });
+        return b;
+      }));
+      const entries = data.journal.filter((e) => tab === "all" || e.kind === tab);
+      $("journal").replaceChildren(...(entries.length ? entries.map((e) => el("div", { className: "entry" },
+        el("div", {}, el("span", { className: "kind", textContent: kinds[e.kind] || e.kind }), el("span", { className: "when", textContent: when(e.created) })),
+        e.topic ? el("div", { className: "when", textContent: e.topic }) : null,
+        el("div", { textContent: e.entry }),
+      )) : [el("p", { className: "when", textContent: "Nothing here yet." })]));
+    }
+
+    async function load() {
+      try {
+        data = await api("/owner/api/delta");
+        render();
+      } catch (err) {
+        status("Can't reach Delta's server. Is it running? " + err.message);
+      }
+    }
+
+    async function action(button, text, fn) {
+      button.disabled = true;
+      status(text);
+      try {
+        status(await fn() || "");
+      } catch (err) {
+        status(err.message);
+      }
+      button.disabled = false;
+      load();
+    }
+
+    $("sleep-toggle").addEventListener("click", (e) => action(e.target, "", async () => {
+      await api(data.sleep.asleep ? "/owner/api/wake" : "/owner/api/sleep", {});
+      return data.sleep.asleep ? "She's awake." : "She's asleep. Visitors see her sleeping until you wake her.";
+    }));
+
+    $("review").addEventListener("click", (e) => action(e.target, "She's looking back at who she's been... (a minute or two)", async () => {
+      const { review } = await api("/owner/api/review", {});
+      if (!review) return "She has nothing new to look back on yet.";
+      return review.changes.length ? `She changed: ${review.changes.map((c) => `${c.trait} ${c.from} → ${c.to}`).join(", ")}` : "She feels the same as before.";
+    }));
+
+    $("undo").addEventListener("click", (e) => action(e.target, "", async () => {
+      if (!confirm("Undo her most recent personality change?")) return "";
+      const { undone } = await api("/owner/api/undo", {});
+      return undone ? `Undone: ${undone.map((c) => `${c.trait} back to ${c.from}`).join(", ")}` : "There's nothing to undo.";
+    }));
+
+    $("roam").addEventListener("click", (e) => action(e.target, "She's off roaming... (a few minutes)", async () => {
+      const result = await api("/owner/roam", { topic: $("roam-topic").value.trim() || undefined });
+      if (!result.trip) return "She couldn't find anything to read this time.";
+      $("roam-topic").value = "";
+      return `She went: ${result.trip.stops.map((s) => s.title).join(" → ")}`;
+    }));
+
+    load();
+    setInterval(load, 30000);
+  </script>
+</body>
+</html>

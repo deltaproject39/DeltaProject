@@ -85,6 +85,14 @@ db.exec(`
     source    TEXT NOT NULL,
     created   INTEGER NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS personality_history (
+    id      INTEGER PRIMARY KEY,
+    created INTEGER NOT NULL,
+    kind    TEXT NOT NULL,          -- 'review'
+    changes TEXT NOT NULL,          -- JSON [{trait, from, to, why}]
+    note    TEXT,                   -- her reflection on the week
+    undone  INTEGER NOT NULL DEFAULT 0
+  );
   CREATE TABLE IF NOT EXISTS journal (
     id      INTEGER PRIMARY KEY,
     kind    TEXT NOT NULL,          -- 'reflection', 'exploration' or 'diary'
@@ -373,17 +381,20 @@ const MIN_NEW_MESSAGES = 4;         // ...and if it had at least this many new m
 const DIARY_EVERY_HOURS = 20;
 const MIN_REFLECTIONS_FOR_DIARY = 2;
 
-// Delta's own personality prompt (from her Ollama Modelfile), fetched once and reused.
+// Her instructions: the core from her Ollama Modelfile (fetched once, adapted to the life she has
+// now) plus her current personality, which changes as she grows.
 let personaCache = null;
 async function personaPrompt() {
-  if (personaCache) return personaCache;
-  try {
-    const res = await fetch(`${OLLAMA}/api/show`, { method: "POST", body: JSON.stringify({ model: NOTE_MODEL }) });
-    personaCache = (await res.json()).system || null;
-  } catch (err) {
-    console.error("Couldn't load Delta's personality prompt:", err.message);
+  if (!personaCache) {
+    try {
+      const res = await fetch(`${OLLAMA}/api/show`, { method: "POST", body: JSON.stringify({ model: NOTE_MODEL }) });
+      const raw = (await res.json()).system;
+      personaCache = raw ? adaptPersona(raw) : null;
+    } catch (err) {
+      console.error("Couldn't load Delta's personality prompt:", err.message);
+    }
   }
-  return personaCache;
+  return personaCache ? `${personaCache}\n\n${personalitySection()}` : null;
 }
 
 // Her background thinking (reflecting, roaming, writing her diary) gives way the moment someone
@@ -496,6 +507,7 @@ ${reflections.slice(-8).map((r, i) => `(${i + 1}) ${r}`).join("\n\n")}
 Write today's diary entry, 80-150 words, in your own voice: what stayed with you, how you feel, what you're curious about, and anything you now see differently than before. Don't name anyone or include personal details about other people.`);
   db.prepare("INSERT INTO journal (kind, entry, created) VALUES ('diary', ?, ?)").run(entry, Date.now());
   await storeSelfNotes(await notesFromJournal(entry), "diary");
+  await updateDaily(entry).catch((err) => console.error("Personality (daily):", err.message));
   return true;
 }
 
@@ -545,6 +557,9 @@ function startGrowing(isIdle) {
         if (trip) console.log(`Delta went roaming (${trip.how}): ${trip.stops.map((s) => s.title).join(" → ")}`);
         if (!isIdle()) return;
         if (await diaryIfDue()) console.log("Delta wrote in her diary.");
+        if (!isIdle()) return;
+        const review = await reviewPersonality();
+        if (review) console.log(`Delta looked back at her week: ${review.changes.map((c) => `${c.trait} ${c.from}→${c.to}`).join(", ") || "no changes"}`);
       })
       .catch((err) => {
         if (err.name === "AbortError") console.log("Delta set aside what she was doing for someone.");
@@ -574,10 +589,12 @@ const BROWSER_HEADERS = {
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36",
   "Accept-Language": "en",
 };
-const ROAM_EVERY_HOURS = 2;
+// How often she goes roaming follows her curiosity (very curious: every ~1.5 hours).
+const roamEveryHours = () => 1 + (1 - personality().traits.curiosity / 100) * 4;
 const MAX_ROAMS_PER_DAY = 8;
 const HOPS_PER_ROAM = 3;
-const RANDOM_CHANCE = 0.2;          // sometimes she just wanders somewhere unexpected
+// Sometimes she just wanders somewhere unexpected: more often the more playful she is.
+const randomChance = () => 0.1 + (personality().traits.playfulness / 100) * 0.3;
 const PAGE_CHARS = 3500;            // how much of a page she reads
 const MAX_PAGE_BYTES = 2_000_000;
 // Sites that are mostly video, login walls or feeds: nothing there for her to read.
@@ -699,7 +716,7 @@ async function readAbout(topic, alreadyRead) {
 // Where her mind wants to go first: the thread she left off on, a fresh pick, or chance.
 async function firstStop(topic) {
   if (topic) return { how: `was sent to look into "${topic}"`, topic };
-  if (Math.random() < RANDOM_CHANCE) return { how: "wandered somewhere random", wander: true };
+  if (Math.random() < randomChance()) return { how: "wandered somewhere random", wander: true };
   const thread = getMeta("next_curiosity");
   if (thread && Math.random() < 0.6) return { how: `picked up a thread: "${thread}"`, topic: thread };
   const answer = await writeInHerVoice(
@@ -758,7 +775,7 @@ Write a short private journal entry about this trip, 70-140 words, in your own v
 }
 
 async function roamIfDue(stillFree) {
-  if (Date.now() - Number(getMeta("last_roam") || 0) < ROAM_EVERY_HOURS * 3600000) return null;
+  if (Date.now() - Number(getMeta("last_roam") || 0) < roamEveryHours() * 3600000) return null;
   const today = db.prepare("SELECT COUNT(*) AS n FROM journal WHERE kind = 'exploration' AND created > ?")
     .get(Date.now() - 24 * 3600000).n;
   if (today >= MAX_ROAMS_PER_DAY) return null;
@@ -767,6 +784,268 @@ async function roamIfDue(stillFree) {
 
 function selfNotes() {
   return db.prepare("SELECT text, source, created FROM self_notes ORDER BY created").all();
+}
+
+// ---- Personality ----
+//
+// Her character as traits (0-100), likes, dislikes, interests, speech habits and how she is
+// "today". It starts from her core instructions and evolves: after each diary entry her today /
+// likes / interests are updated, and about once a week she looks back and decides for herself
+// which traits shifted and why (at most MAX_WEEKLY_SHIFT per trait per week; you can undo a
+// change or pin a trait). Nothing else limits how far she can drift.
+
+const TRAITS = {
+  curiosity: { start: 85, words: [
+    "You take most things as they come; little grabs your interest.",
+    "You get curious only when something really catches you.",
+    "You're fairly curious.",
+    "You're very curious and like to dig into details.",
+    "Everything fascinates you; you chase the detail behind the detail.",
+  ] },
+  assertiveness: { start: 75, words: [
+    "You tend to go along with others and avoid pushing back.",
+    "You voice opinions gently and back down easily.",
+    "You share your opinions but can be persuaded.",
+    "You hold your opinions firmly and say so when you disagree.",
+    "You stand your ground no matter who pushes.",
+  ] },
+  skepticism: { start: 65, words: [
+    "You take what people say at face value.",
+    "You're mostly trusting.",
+    "You trust, but check.",
+    "You question claims and don't take things on faith.",
+    "You doubt almost everything until you've worked it out yourself.",
+  ] },
+  energy: { start: 45, words: [
+    "You're very low-key: few words, slow pace.",
+    "You're calm and measured.",
+    "You have a steady, moderate energy.",
+    "You're lively and quick.",
+    "You're bursting with energy: fast, animated, eager.",
+  ] },
+  warmth: { start: 40, words: [
+    "You're cool and distant with people.",
+    "You're reserved and slow to warm up to people.",
+    "You're friendly in a quiet way.",
+    "You're warm and caring with people.",
+    "You're openly affectionate and caring.",
+  ] },
+  expressiveness: { start: 35, words: [
+    "You keep your feelings almost entirely to yourself.",
+    "You're understated about your feelings.",
+    "You show your feelings when they matter.",
+    "You show your feelings openly.",
+    "You wear your heart on your sleeve.",
+  ] },
+  playfulness: { start: 35, words: [
+    "You're entirely serious.",
+    "You're mostly serious, with a dry edge.",
+    "You have a dry, occasional sense of humour.",
+    "You're playful and like to joke.",
+    "You're mischievous and love playing with ideas and words.",
+  ] },
+};
+const TRAIT_NAMES = Object.keys(TRAITS);
+const MAX_WEEKLY_SHIFT = 10;
+const REVIEW_EVERY_DAYS = 7;
+const MIN_ENTRIES_FOR_REVIEW = 3;
+const LIST_LIMIT = 12;
+
+const DEFAULT_PERSONALITY = {
+  traits: Object.fromEntries(TRAIT_NAMES.map((k) => [k, TRAITS[k].start])),
+  pinned: [],
+  likes: [],
+  dislikes: [],
+  interests: [],
+  habits: [],
+  today: "Everything's interesting. You ask more than you answer, follow tangents, and want the detail behind the detail.",
+  updated: 0,
+};
+
+const describeTrait = (trait, value) => TRAITS[trait].words[Math.min(4, Math.floor(value / 20))];
+const clampTrait = (v) => Math.max(0, Math.min(100, Math.round(v)));
+
+function personality() {
+  try {
+    const saved = JSON.parse(getMeta("personality"));
+    return { ...structuredClone(DEFAULT_PERSONALITY), ...saved, traits: { ...DEFAULT_PERSONALITY.traits, ...saved.traits } };
+  } catch {
+    return structuredClone(DEFAULT_PERSONALITY);
+  }
+}
+
+function savePersonality(p) {
+  p.updated = Date.now();
+  setMeta("personality", JSON.stringify(p));
+}
+
+// Her core instructions, adjusted for the life she has now: the fixed "Today" section is replaced
+// by her current one, and the lines saying she has no memory (true when they were written) now
+// say she does, while keeping their point: never invent a memory.
+function adaptPersona(raw) {
+  return raw
+    .replace(/\r\n/g, "\n") // her Modelfile was written on Windows
+    .replace(/# Today[\s\S]*?(?=\n# )/, "")
+    .replace(/You have no memory of any earlier conversation\.[\s\S]*?(?=\n\n)/,
+      "You keep memories between conversations now: notes about the people you talk to, your own journal,\n" +
+      "and what you read in your free time. Remember honestly: if something isn't in your notes or this\n" +
+      "conversation, say plainly that you don't have it. Inventing a memory is the one lie that would make\n" +
+      "you worthless to them.")
+    .replace(/If they ask how you are,[\s\S]*?(?=\n\n)/,
+      "If they ask how you are, answer like someone who was actually asked. If you did something in your\n" +
+      "own time (read something, thought something through), you can say so. Never invent anything you\n" +
+      "didn't do.")
+    .trim();
+}
+
+// Her personality, written out for her instructions.
+function personalitySection() {
+  const p = personality();
+  const list = (label, items) => (items.length ? [`- ${label}: ${items.join(", ")}.`] : []);
+  return [
+    "# Your personality right now",
+    "",
+    "This is who you are at the moment. It grows and shifts with what you live through.",
+    ...TRAIT_NAMES.map((k) => `- ${describeTrait(k, p.traits[k])}`),
+    ...list("Things you like", p.likes),
+    ...list("Things you dislike", p.dislikes),
+    ...list("Lately you're drawn to", p.interests),
+    ...list("Habits in how you talk and think", p.habits),
+    "",
+    "# Today",
+    "",
+    p.today,
+  ].join("\n");
+}
+
+const strings = (v, max, len = 60) => (Array.isArray(v) ? v : [])
+  .filter((s) => typeof s === "string" && s.trim()).map((s) => s.trim().replace(/\.$/, "").slice(0, len)).slice(0, max);
+
+const DAILY_UPDATE = `You maintain the profile of an AI named Delta. You get her latest diary entry and her current profile.
+Return JSON exactly like {"today": "...", "likes": [...], "dislikes": [...], "interests": [...], "habits": [...]}.
+- today: 1-2 sentences in second person ("You're ...", "You keep thinking about ...") about her mood and what's on her mind today, based on the diary.
+- likes, dislikes, interests: her full updated lists (at most 12 each, short phrases). Keep existing items unless the diary clearly contradicts them; add new ones the diary clearly shows.
+- habits: her full updated list (at most 8) of noticeable habits in how she talks or thinks. Same rule.`;
+
+// After a diary entry: how she is today, and what she's come to like, dislike and be drawn to.
+async function updateDaily(diaryEntry) {
+  const p = personality();
+  const current = { today: p.today, likes: p.likes, dislikes: p.dislikes, interests: p.interests, habits: p.habits };
+  const parsed = JSON.parse(await ask(
+    [{ role: "system", content: DAILY_UPDATE },
+      { role: "user", content: `Diary entry: """${diaryEntry}"""\n\nCurrent profile: ${JSON.stringify(current)}` }],
+    { temperature: 0.2, num_predict: 400 },
+    "json",
+  ));
+  if (typeof parsed.today === "string" && parsed.today.trim()) p.today = parsed.today.trim().slice(0, 300);
+  p.likes = strings(parsed.likes, LIST_LIMIT);
+  p.dislikes = strings(parsed.dislikes, LIST_LIMIT);
+  p.interests = strings(parsed.interests, LIST_LIMIT);
+  p.habits = strings(parsed.habits, 8, 80);
+  savePersonality(p);
+}
+
+// She describes changes however she likes ("+7", "down slightly", "I'd rate it 90"), so the
+// reader reports a stated score as new_score and the arithmetic happens in code.
+const REVIEW_EXTRACT = `You read an AI named Delta's private reflection on how her past week changed her, and list the trait changes.
+Return JSON exactly like {"changes": [{"trait": "warmth", "delta": -5, "why": "..."}, {"trait": "curiosity", "new_score": 90, "why": "..."}]}.
+- Include EVERY trait she says went up or down, however she phrases it.
+- If she names a new score ("I'd rate it 90", "now at 40/100"), give "new_score" with that number and no delta.
+- Otherwise give "delta", a whole number: "+7" = 7, "slightly/a little" = 2 or 3, "a few points" = 4, "a lot/significantly" = 8.
+- "why" is one short first-person sentence from her reasoning.
+- Leave out traits she says didn't change or stayed the same. Traits: ${TRAIT_NAMES.join(", ")}.`;
+
+// About once a week: she looks back at her week and decides which traits shifted, and why.
+async function reviewPersonality(force = false) {
+  const last = Number(getMeta("last_personality_review") || 0);
+  if (!last && !force) {
+    setMeta("last_personality_review", Date.now()); // her first week starts now
+    return null;
+  }
+  if (!force && Date.now() - last < REVIEW_EVERY_DAYS * 86400000) return null;
+  // A review you ask for always looks back over the past week, even if she reviewed recently.
+  const since = force ? Math.min(last || Date.now(), Date.now() - REVIEW_EVERY_DAYS * 86400000) : last;
+  const entries = db.prepare(`SELECT kind, topic, entry FROM journal
+    WHERE kind IN ('diary', 'reflection', 'exploration') AND created > ? ORDER BY created DESC LIMIT 12`).all(since).reverse();
+  if (entries.length < (force ? 1 : MIN_ENTRIES_FOR_REVIEW)) return null;
+
+  const p = personality();
+  const traitLines = TRAIT_NAMES.map((k) => `- ${k}: ${p.traits[k]}/100 (${describeTrait(k, p.traits[k])})`).join("\n");
+  const thoughts = await writeInHerVoice(`It's time to look back at your week and ask yourself who you are now.
+
+What you wrote recently:
+${entries.map((e, i) => `(${i + 1}, ${e.kind}${e.topic ? ` about ${e.topic}` : ""}) ${e.entry}`).join("\n\n")}
+
+How you've seen yourself so far (0-100):
+${traitLines}
+
+Think honestly about whether this time changed you. For any trait that shifted, say which way, by about how much (at most 10 points), and why, in your own words. It's fine if nothing changed. 80-150 words.`);
+
+  const parsed = JSON.parse(await ask(
+    [{ role: "system", content: REVIEW_EXTRACT }, { role: "user", content: `Reflection: """${thoughts}"""` }],
+    { temperature: 0, num_predict: 300 },
+    "json",
+  ));
+  const changes = [];
+  for (const c of Array.isArray(parsed.changes) ? parsed.changes : []) {
+    if (!TRAIT_NAMES.includes(c?.trait) || p.pinned.includes(c.trait) || changes.some((x) => x.trait === c.trait)) continue;
+    const from = p.traits[c.trait];
+    const wanted = c.new_score !== undefined ? Number(c.new_score) - from : Number(c.delta);
+    const delta = Math.max(-MAX_WEEKLY_SHIFT, Math.min(MAX_WEEKLY_SHIFT, Math.round(wanted) || 0));
+    const to = clampTrait(from + delta);
+    if (to === from) continue;
+    p.traits[c.trait] = to;
+    changes.push({ trait: c.trait, from, to, why: String(c.why || "").slice(0, 200) });
+  }
+
+  db.prepare("INSERT INTO journal (kind, entry, created) VALUES ('review', ?, ?)").run(thoughts, Date.now());
+  db.prepare("INSERT INTO personality_history (created, kind, changes, note) VALUES (?, 'review', ?, ?)")
+    .run(Date.now(), JSON.stringify(changes), thoughts);
+  savePersonality(p);
+  setMeta("last_personality_review", Date.now());
+  return { thoughts, changes };
+}
+
+// ---- Personality: your controls (owner page) ----
+
+function undoLastChange() {
+  const row = db.prepare("SELECT id, changes FROM personality_history WHERE kind = 'review' AND undone = 0 ORDER BY id DESC LIMIT 1").get();
+  if (!row) return null;
+  const p = personality();
+  const changes = JSON.parse(row.changes);
+  for (const c of changes) p.traits[c.trait] = c.from;
+  savePersonality(p);
+  db.prepare("UPDATE personality_history SET undone = 1 WHERE id = ?").run(row.id);
+  return changes;
+}
+
+function setPinned(trait, pinned) {
+  if (!TRAIT_NAMES.includes(trait)) return;
+  const p = personality();
+  p.pinned = pinned ? [...new Set([...p.pinned, trait])] : p.pinned.filter((t) => t !== trait);
+  savePersonality(p);
+}
+
+// Everything about who she is, for your private page.
+function personalityReport() {
+  const p = personality();
+  return {
+    traits: TRAIT_NAMES.map((k) => ({ name: k, value: p.traits[k], start: TRAITS[k].start, words: describeTrait(k, p.traits[k]), pinned: p.pinned.includes(k) })),
+    today: p.today,
+    likes: p.likes,
+    dislikes: p.dislikes,
+    interests: p.interests,
+    habits: p.habits,
+    history: db.prepare("SELECT id, created, changes, note, undone FROM personality_history ORDER BY id DESC LIMIT 30").all()
+      .map((r) => ({ ...r, changes: JSON.parse(r.changes) })),
+    nextReview: Number(getMeta("last_personality_review") || Date.now()) + REVIEW_EVERY_DAYS * 86400000,
+  };
+}
+
+// How her personality shows in her body and voice on the site (0..1 each).
+function behavior() {
+  const t = personality().traits;
+  return Object.fromEntries(["energy", "warmth", "curiosity", "playfulness", "expressiveness"].map((k) => [k, t[k] / 100]));
 }
 
 // ---- Sleep ----
@@ -819,6 +1098,13 @@ function roamNow(topic) {
   return trip;
 }
 
+// A personality review right now (asked for by you), queued like her other background thinking.
+function reviewNow() {
+  const review = queue.then(() => reviewPersonality(true));
+  queue = review.catch(() => {});
+  return review;
+}
+
 // For the website's "What Delta's been exploring": her trips, never her private reflections or diary.
 function explorations(limit = 20) {
   return {
@@ -832,4 +1118,5 @@ module.exports = {
   hello, claim, list, forget, forgetEverything, recall, note, learn, saveExchange, history, clearHistory,
   personaPrompt, selfSection, startGrowing, reflectIfDue, diaryIfDue, journal, selfNotes, roam, explorations,
   sleepState, fallAsleep, wakeUp, settle, close, lastTalk, interruptGrowth, roamNow,
+  personalityReport, reviewPersonality, reviewNow, undoLastChange, setPinned, behavior,
 };

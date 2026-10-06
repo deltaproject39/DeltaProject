@@ -7,6 +7,8 @@
 // sleep gracefully: she finishes any note she's writing and everything is saved first.
 
 const http = require("http");
+const fs = require("fs");
+const path = require("path");
 const memory = require("./memory");
 
 const PORT = 8787;
@@ -153,11 +155,13 @@ async function speak(res, cors, body) {
 
   ttsActive++;
   try {
-    // Only the text is passed on, so visitors can't change Delta's voice settings.
+    // Only the text comes from visitors, so they can't change Delta's voice settings. Her pace
+    // follows her energy: livelier Delta talks a little faster.
+    const pace = 0.92 + 0.16 * memory.behavior().energy;
     const upstream = await fetch(`${TTS}/tts`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, pace }),
     });
     if (!upstream.ok) throw new Error(`Voice server returned ${upstream.status}`);
     const audio = Buffer.from(await upstream.arrayBuffer());
@@ -177,6 +181,44 @@ async function speak(res, cors, body) {
   } finally {
     ttsActive--;
   }
+}
+
+// Your private page about her: http://localhost:8787/owner (only ever answered on this PC).
+// Returns false for owner routes handled elsewhere (sleep-and-close, roam).
+function handleOwner(req, res) {
+  if (req.method === "GET" && (req.url === "/owner" || req.url === "/owner/")) {
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(fs.readFileSync(path.join(__dirname, "owner.html")));
+    return true;
+  }
+  if (req.method === "GET" && req.url === "/owner/api/delta") {
+    send(res, 200, {
+      ...memory.personalityReport(),
+      selfNotes: memory.selfNotes(),
+      journal: memory.journal(40),
+      sleep: memory.sleepState(),
+      now: memory.explorations(1).now,
+    });
+    return true;
+  }
+  if (req.method !== "POST" || !req.url.startsWith("/owner/api/")) return false;
+  readBody(req, res, {}, async (body) => {
+    let msg = {};
+    try { msg = JSON.parse(body || "{}"); } catch {}
+    try {
+      switch (req.url) {
+        case "/owner/api/review": return send(res, 200, { review: await memory.reviewNow() });
+        case "/owner/api/undo": return send(res, 200, { undone: memory.undoLastChange() });
+        case "/owner/api/pin": memory.setPinned(msg.trait, Boolean(msg.pinned)); return send(res, 200, { ok: true });
+        case "/owner/api/sleep": memory.fallAsleep("manual"); return send(res, 200, { ok: true });
+        case "/owner/api/wake": memory.wakeUp(); return send(res, 200, { ok: true });
+        default: return send(res, 404, { error: "Not found" });
+      }
+    } catch (err) {
+      send(res, 500, { error: err.name === "AbortError" ? "Someone came to talk to her, so she set it aside. Try again later." : err.message });
+    }
+  });
+  return true;
 }
 
 // "a few minutes" / "3 hours" / "2 days"
@@ -273,6 +315,17 @@ const server = http.createServer((req, res) => {
       "Access-Control-Allow-Headers": "Content-Type",
     });
     return res.end();
+  }
+
+  // How her personality shows in her body on the site (energy, warmth, ...: 0..1 each).
+  if (req.method === "GET" && req.url === "/character") {
+    return send(res, 200, memory.behavior(), cors);
+  }
+
+  // Your private page about her (this PC only).
+  if (req.url.startsWith("/owner/") || req.url === "/owner") {
+    if (isFromThisPC(req) && handleOwner(req, res)) return;
+    if (!isFromThisPC(req)) return send(res, 404, { error: "Not found" }, cors);
   }
 
   // Her public "roaming" feed: where she's been on her own and what she thought (no visitor data).
@@ -381,7 +434,13 @@ const server = http.createServer((req, res) => {
     } catch (err) {
       console.error("Self:", err.message);
     }
-    const extras = [self, recalled.length ? memory.note(recalled) : ""].filter(Boolean);
+    // With no notes about someone, she's told so plainly; otherwise she may fill the gap with an
+    // invented memory (she once "remembered" a name nobody had told her).
+    const aboutThem = recalled.length
+      ? memory.note(recalled)
+      : "# Your notes about this person\n\nYou don't have any notes about this person. Apart from what they've said in this " +
+        "conversation, you don't know their name or anything about them. Never guess or invent it.";
+    const extras = [self, aboutThem].filter(Boolean);
     const prompt = !extras.length
       ? messages
       : persona

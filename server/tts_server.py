@@ -214,6 +214,9 @@ class Handler(BaseHTTPRequestHandler):
                 if "preview" in body else load_settings()
             if body.get("feeling", True):
                 settings = with_feeling(settings, feeling)
+            # Her personality's pace (sent by the gatekeeper), on top of the saved speed.
+            pace = min(1.2, max(0.8, float(body.get("pace", 1.0) or 1.0)))
+            settings = {**settings, "speed": settings["speed"] * pace}
             try:
                 tag = f'{feeling["emotion"]}:{feeling["score"]}:{feeling["label"]}'
                 all_groups = ",".join(f"{k}={v}" for k, v in feeling["groups"].items())

@@ -565,11 +565,33 @@
 
     document.getElementById("header-avatar").prepend(makeAvatar());
 
+    // ---- Personality: how her character shows in her body (0..1 each, from her server) ----
+    // These defaults are where she started; loadCharacter() fetches who she is now.
+    const traits = { energy: 0.45, warmth: 0.4, curiosity: 0.85, playfulness: 0.35, expressiveness: 0.35 };
+    const liveliness = () => 0.55 + traits.energy;          // 1 at her starting energy
+    const expressive = () => 0.65 + traits.expressiveness;  // 1 at her starting expressiveness
+
+    async function loadCharacter() {
+      if (!deltaServer) return;
+      try {
+        const res = await fetch(deltaServer + "/character", { cache: "no-store" });
+        if (res.ok) Object.assign(traits, await res.json());
+        mood.temper();
+      } catch {}
+    }
+
     // ---- Mood: Delta's emotional state, which builds up with each event and fades over time ----
     const mood = (() => {
       const KEYS = ["happy", "sad", "angry", "surprised", "curious", "scared", "neutral"];
-      // Her resting temperament: mostly calm, a little curious, a little happy. That's who she is.
-      const BASELINE = { happy: 0.15, sad: 0, angry: 0, surprised: 0, curious: 0.25, scared: 0, neutral: 0.6 };
+      // Her resting temperament comes from her personality: warmer means a little happier at rest,
+      // more curious means more curious at rest, livelier means less flatly calm.
+      const BASELINE = { happy: 0, sad: 0, angry: 0, surprised: 0, curious: 0, scared: 0, neutral: 0 };
+      function temper() {
+        BASELINE.happy = 0.05 + 0.25 * traits.warmth;
+        BASELINE.curious = 0.3 * traits.curiosity;
+        BASELINE.neutral = 0.85 - 0.5 * traits.energy;
+      }
+      temper();
       // Seconds for a feeling to fade halfway back to baseline: surprise passes fast, sadness lingers.
       const HALF_LIFE = { happy: 90, sad: 150, angry: 60, surprised: 12, curious: 45, scared: 40, neutral: 30 };
       // Feeling one thing pushes its opposites down.
@@ -626,7 +648,7 @@
       }, 200);
       setInterval(save, 5000);
 
-      return { feel, get state() { return state; } };
+      return { feel, temper, get state() { return state; } };
     })();
 
     // ---- Character: Delta's VRM model, animated with three.js + three-vrm ----
@@ -701,8 +723,8 @@
           if (t > nextGlance) {
             glance = Math.random() < 0.3
               ? { x: 0, y: 0 } // back to the viewer
-              : { x: (Math.random() * 2 - 1) * 0.7 * motion, y: (Math.random() * 2 - 1) * 0.35 * motion };
-            nextGlance = t + 1500 + Math.random() * 2500;
+              : { x: (Math.random() * 2 - 1) * 0.7 * motion * liveliness(), y: (Math.random() * 2 - 1) * 0.35 * motion * liveliness() };
+            nextGlance = t + (1500 + Math.random() * 2500) / liveliness();
           }
           out.lx = glance.x;
           out.ly = glance.y;
@@ -719,23 +741,24 @@
             out.aa = 0.15 + 0.6 * open;
             out.oh = 0.3 * Math.abs(Math.sin(t / 90));
           }
-          out.ly += Math.sin(t / 160) * 0.12 * motion;
-          out.tilt += Math.sin(t / 700) * 0.6 * motion;
+          out.ly += Math.sin(t / 160) * 0.12 * motion * liveliness();
+          out.tilt += Math.sin(t / 700) * 0.6 * motion * liveliness();
           out.happy = 0.15;
         }
 
         // Her mood shows all the time, softly.
         const m = mood.state;
-        out.happy = Math.max(out.happy, 0.5 * m.happy);
-        out.sad = 0.6 * m.sad;
-        out.angry = 0.5 * m.angry;
-        out.surprised = 0.6 * m.surprised + 0.2 * m.scared;
+        const x = expressive();
+        out.happy = Math.max(out.happy, Math.min(1, 0.5 * m.happy * x));
+        out.sad = Math.min(1, 0.6 * m.sad * x);
+        out.angry = Math.min(1, 0.5 * m.angry * x);
+        out.surprised = Math.min(1, (0.6 * m.surprised + 0.2 * m.scared) * x);
         out.ly += 0.3 * m.sad;
         out.tilt += 0.5 * m.curious - 0.3 * m.angry;
 
         // The feeling of the sentence she's saying right now shows more strongly.
         if (t < feeling.until) {
-          const s = feeling.strength * Math.min(1, (feeling.until - t) / 800);
+          const s = Math.min(1, feeling.strength * expressive()) * Math.min(1, (feeling.until - t) / 800);
           switch (feeling.emotion) {
             case "happy": out.happy = Math.max(out.happy, 0.6 * s); out.tilt += 0.4 * s; break;
             case "sad": out.sad = Math.max(out.sad, 0.7 * s); out.ly += 0.35 * s; break;
@@ -921,7 +944,7 @@
             }
             if (t > nextTalkGesture) {
               gesture = pick(TALK_GESTURES);
-              nextTalkGesture = t + 1200 + Math.random() * 1500;
+              nextTalkGesture = t + (1200 + Math.random() * 1500) / liveliness();
             }
             return gesture;
           }
@@ -929,7 +952,7 @@
           if (t > nextIdleAction) {
             gesture = pick(IDLE_ACTIONS);
             gestureUntil = t + 2500 + Math.random() * 2000;
-            nextIdleAction = gestureUntil + 5000 + Math.random() * 7000;
+            nextIdleAction = gestureUntil + (5000 + Math.random() * 7000) / liveliness();
             return gesture;
           }
           return "rest";
@@ -967,7 +990,7 @@
           for (const key in cur) cur[key] += (goal[key] - cur[key]) * (1 - Math.pow(1 - ease[key], dt * 60));
 
           const breath = Math.sin(t / (state === "sleeping" ? 875 : 573)) * motion;
-          const sway = Math.sin(t / 1900) * motion;
+          const sway = Math.sin(t / 1900) * motion * liveliness();
           const idleTilt = Math.sin(t / 2600) * motion;
 
           // The head turns part of the way toward what she's looking at; her eyes do the rest.
@@ -1253,6 +1276,7 @@
       }
       misses = 0;
       setPresence(health.asleep ? "asleep" : "awake");
+      loadCharacter();
       if (presence === "awake") {
         // While she's out roaming, her status line says what she's reading.
         const roam = await roaming.fetchRoam();
@@ -1275,6 +1299,7 @@
         return;
       }
       deltaServer = config.deltaServer;
+      loadCharacter();
       const known = await memoryBook.hello();
       restoreConversation(known ? await memoryBook.loadConversation() : []);
       setPresence(health.asleep ? "asleep" : "awake");
