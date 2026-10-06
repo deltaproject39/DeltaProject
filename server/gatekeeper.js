@@ -223,6 +223,7 @@ function handleOwner(req, res) {
         case "/owner/api/wake": memory.wakeUp(); return send(res, 200, { ok: true });
         case "/owner/api/sketch": return send(res, 200, { sketch: await memory.sketchNow(msg.idea) });
         case "/owner/api/mirror": return send(res, 200, await memory.mirrorNow());
+        case "/owner/api/sketch-origin": memory.setSketchOrigin(msg.id, msg.origin); return send(res, 200, { ok: true });
         case "/owner/api/sketch-public": memory.setSketchPublic(msg.id, Boolean(msg.public)); return send(res, 200, { ok: true });
         default: return send(res, 404, { error: "Not found" });
       }

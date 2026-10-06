@@ -302,8 +302,10 @@
 
     /* Sketchbook dialog */
     .sketch-sheet { width: min(720px, calc(100% - 32px)); }
-    #sketch-list { max-height: 65vh; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
-    #sketch-list > .sub { grid-column: 1 / -1; }
+    .sketch-sheet { max-height: 85vh; overflow-y: auto; }
+    #sketch-list, #sketch-requested { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
+    #sketch-list > .sub, #sketch-requested > .sub { grid-column: 1 / -1; margin: 0; }
+    .sketch-group { margin: 16px 0 8px; font-size: 0.8rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
     .drawing { margin: 0; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
     .drawing img { display: block; width: 100%; aspect-ratio: 1; object-fit: cover; background: var(--bg-glow); }
     .drawing figcaption { padding: 10px 12px; display: grid; gap: 6px; font-size: 0.85rem; line-height: 1.5; }
@@ -518,7 +520,10 @@
     <h2 id="sketch-title">🎨 Delta's sketchbook</h2>
     <p class="sub">When she feels like it, she draws in her free time: what, how and why are up to her.
       Then she looks at what came out and says what she honestly thinks of it.</p>
+    <h3 class="sketch-group">Her own</h3>
     <div id="sketch-list"></div>
+    <h3 class="sketch-group">Drawn because someone asked</h3>
+    <div id="sketch-requested"></div>
     <div class="sheet-actions">
       <button type="button" class="plain" id="sketch-close" style="margin-left:auto">Close</button>
     </div>
@@ -1767,6 +1772,7 @@
     (() => {
       const dialog = document.getElementById("sketch-dialog");
       const listEl = document.getElementById("sketch-list");
+      const requestedEl = document.getElementById("sketch-requested");
       const when = (ms) => new Date(ms).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
       const note = (text) => {
         const p = document.createElement("p");
@@ -1781,9 +1787,9 @@
           const res = deltaServer && await fetch(deltaServer + "/sketches", { cache: "no-store" });
           if (res && res.ok) sketches = await res.json();
         } catch {}
+        requestedEl.replaceChildren();
         if (!sketches) return listEl.replaceChildren(note("Delta is offline right now, so her sketchbook is closed."));
-        if (sketches.length === 0) return listEl.replaceChildren(note("Her sketchbook is still empty. She draws when she feels like it."));
-        listEl.replaceChildren(...sketches.map((s) => {
+        const figure = (s) => {
           const fig = document.createElement("figure");
           fig.className = "drawing";
           const link = document.createElement("a");
@@ -1806,7 +1812,11 @@
           }
           fig.append(link, caption);
           return fig;
-        }));
+        };
+        const own = sketches.filter((s) => s.origin !== "requested");
+        const requested = sketches.filter((s) => s.origin === "requested");
+        listEl.replaceChildren(...(own.length ? own.map(figure) : [note("Nothing of her own yet. She draws when she feels like it.")]));
+        requestedEl.replaceChildren(...(requested.length ? requested.map(figure) : [note("Nobody has asked her for a drawing yet.")]));
       }
 
       document.getElementById("sketch-toggle").addEventListener("click", () => {

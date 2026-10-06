@@ -115,6 +115,10 @@ db.exec(`
     public   INTEGER NOT NULL DEFAULT 1
   );
 `);
+// 'own': her own idea (or someone's idea that genuinely interested her); 'requested': drawn for someone.
+if (!db.prepare("PRAGMA table_info(sketches)").all().some((c) => c.name === "origin")) {
+  db.exec("ALTER TABLE sketches ADD COLUMN origin TEXT NOT NULL DEFAULT 'own'");
+}
 const MAX_SAVED_MESSAGES = 200; // per visitor; older ones are dropped
 
 const MAX_PIN_FAILS = 5;
@@ -855,6 +859,7 @@ async function roamIfDue(stillFree) {
 const ART = "http://127.0.0.1:8789";
 const SKETCH_DIR = path.join(__dirname, "sketches"); // her drawings (git-ignored; served by the gatekeeper)
 const MAX_FREE_SKETCHES_PER_DAY = 12; // only so the PC isn't busy drawing all day
+const ANY_IDEA = "anything you like"; // asked to draw, but the subject is up to her
 
 const ART_PROMPT = `You write prompts for an image generator (Stable Diffusion). You get an artist's plan for a drawing.
 Return JSON exactly like {"prompt": "..."}: one line, at most 50 words, comma-separated phrases: the concrete subject and setting first, then colours and light, then the medium and style from the plan. Only things that can be seen: turn feelings and ideas into visual metaphors. No words, letters or signatures in the picture. Nothing sexual or gory.`;
@@ -906,6 +911,11 @@ async function sketch(idea, { signal = growth.signal, inChat = false } = {}) {
 DRAW: <what you'll draw, so someone could picture it: the subject, the setting, the colours, the light>
 MEDIUM: <how you'll draw it, e.g. pencil, ink, watercolour, oil, charcoal, pastel, gouache, digital>
 WHY: <one or two sentences, in your own voice, about why this, now>`;
+  // Someone else's idea: does it really interest her, or is she drawing it for them?
+  const requested = Boolean(idea) && idea !== ANY_IDEA;
+  const keepLine = requested
+    ? "\nKEEP: <yes or no, honestly: does this idea genuinely interest you, enough to keep it in your own sketchbook? No is fine: then you're drawing it for them>"
+    : "";
 
   activity = "Thinking about what to draw";
   try {
@@ -915,7 +925,7 @@ WHY: <one or two sentences, in your own voice, about why this, now>`;
 ${context}
 
 Reply in exactly this form:
-${form}`, undefined, signal)
+${form}${keepLine}`, undefined, signal)
       : await writeInHerVoice(`You have a quiet moment to yourself, and a sketchbook. Nobody asked you to draw: it's entirely up to you, and it doesn't have to be about anything you've been reading.
 
 ${context}
@@ -925,7 +935,8 @@ If you do, reply in exactly this form:
 ${form}`, undefined, signal);
 
     const field = (name) => plan.match(new RegExp(`^\\W*${name}\\W*:\\s*(.+)$`, "im"))?.[1]?.replace(/^["*]+|["*]+$/g, "").trim();
-    const [title, what, medium, why] = ["TITLE", "DRAW", "MEDIUM", "WHY"].map(field);
+    const [title, what, medium, why, keep] = ["TITLE", "DRAW", "MEDIUM", "WHY", "KEEP"].map(field);
+    const origin = requested && !/^y/i.test(keep || "") ? "requested" : "own";
     if (!what || !title) {
       setMeta("last_sketch", Date.now()); // not in the mood: ask again another time
       return null;
@@ -955,8 +966,8 @@ Look at what actually came out. In 2-4 sentences, in your own voice: what do you
     ));
 
     const created = Date.now();
-    const { lastInsertRowid: id } = db.prepare(`INSERT INTO sketches (created, title, why, thoughts, prompt, public)
-      VALUES (?, ?, ?, ?, ?, ?)`).run(created, title.slice(0, 100), (why || "").slice(0, 500), thoughts, prompt, check.unsafe ? 0 : 1);
+    const { lastInsertRowid: id } = db.prepare(`INSERT INTO sketches (created, title, why, thoughts, prompt, public, origin)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`).run(created, title.slice(0, 100), (why || "").slice(0, 500), thoughts, prompt, check.unsafe ? 0 : 1, origin);
     fs.mkdirSync(SKETCH_DIR, { recursive: true });
     fs.writeFileSync(path.join(SKETCH_DIR, `${id}.png`), png);
     db.prepare("INSERT INTO journal (kind, entry, created, topic, sources) VALUES ('sketch', ?, ?, ?, ?)")
@@ -964,7 +975,7 @@ Look at what actually came out. In 2-4 sentences, in your own voice: what do you
     setMeta("last_sketch", created);
     setMeta("draw_requests", "[]"); // she's seen them; whether she drew one was up to her
     await storeSelfNotes(await notesFromJournal(thoughts, signal), "sketch");
-    return { id: Number(id), title, why, thoughts, prompt, public: !check.unsafe };
+    return { id: Number(id), title, why, thoughts, prompt, public: !check.unsafe, origin };
   } finally {
     activity = null;
   }
@@ -981,14 +992,14 @@ async function maybeSketch() {
 
 // A drawing right now (asked for by you), queued with her other background thinking.
 function sketchNow(idea) {
-  const drawing = queue.then(() => sketch(String(idea || "").trim().slice(0, 200) || "anything you like"));
+  const drawing = queue.then(() => sketch(String(idea || "").trim().slice(0, 200) || ANY_IDEA));
   queue = drawing.catch(() => {});
   return drawing;
 }
 
 // Her sketchbook: for the website only the public ones; for you, everything.
 function sketches({ all = false, limit = 60 } = {}) {
-  return db.prepare(`SELECT id, created, title, why, thoughts${all ? ", prompt, public" : ""} FROM sketches
+  return db.prepare(`SELECT id, created, title, why, thoughts, origin${all ? ", prompt, public" : ""} FROM sketches
     ${all ? "" : "WHERE public = 1"} ORDER BY created DESC LIMIT ?`).all(limit);
 }
 
@@ -1002,6 +1013,11 @@ function sketchFile(id, all = false) {
 
 function setSketchPublic(id, isPublic) {
   db.prepare("UPDATE sketches SET public = ? WHERE id = ?").run(isPublic ? 1 : 0, Number(id));
+}
+
+function setSketchOrigin(id, origin) {
+  if (origin !== "own" && origin !== "requested") return;
+  db.prepare("UPDATE sketches SET origin = ? WHERE id = ?").run(origin, Number(id));
 }
 
 // ---- The mirror: what she looks like ----
@@ -1137,7 +1153,7 @@ function startChatDrawing(visitor, idea) {
   sketch(idea, { signal: AbortSignal.timeout(10 * 60000), inChat: true })
     .then((s) => {
       if (!s) throw new Error("She didn't end up drawing it.");
-      job.sketch = { id: s.id, title: s.title, thoughts: s.thoughts, public: s.public };
+      job.sketch = { id: s.id, title: s.title, thoughts: s.thoughts, public: s.public, origin: s.origin };
       job.status = "done";
       // Part of the conversation, so she remembers drawing it for them.
       if (isKnown(visitor)) {
@@ -1506,7 +1522,7 @@ module.exports = {
   personaPrompt, selfSection, startGrowing, reflectIfDue, diaryIfDue, journal, selfNotes, roam, explorations,
   sleepState, fallAsleep, wakeUp, settle, close, lastTalk, interruptGrowth, roamNow,
   personalityReport, reviewPersonality, reviewNow, undoLastChange, setPinned, behavior,
-  sketchNow, sketches, sketchFile, setSketchPublic, stopDrawing,
+  sketchNow, sketches, sketchFile, setSketchPublic, setSketchOrigin, stopDrawing,
   mirrorNow, appearance, noteDrawRequest, mirrorImages, asksAboutLooks,
   startChatDrawing, chatDrawing, isDrawingInChat,
 };

@@ -144,7 +144,10 @@
         <input id="sketch-idea" placeholder="Suggest something, or leave empty to let her choose">
         <button id="sketch">Ask her to draw</button>
       </div>
-      <div class="sketches" id="sketches"></div>
+      <div class="label" style="margin-top:14px">Her own</div>
+      <div class="sketches" id="sketches-own"></div>
+      <div class="label" style="margin-top:18px">Drawn because someone asked</div>
+      <div class="sketches" id="sketches-requested"></div>
     </section>
 
     <section>
@@ -230,7 +233,12 @@
       $("self-notes").replaceChildren(...[...data.selfNotes].reverse().map((n) =>
         el("li", {}, n.text, " ", el("span", { className: "when", textContent: `(${n.source}, ${when(n.created)})` }))));
 
-      $("sketches").replaceChildren(...(data.sketches.length ? data.sketches.map((s) => {
+      const card = (s) => {
+        const move = el("button", { className: "pin", textContent: s.origin === "own" ? "Move to requested" : "Move to her own" });
+        move.addEventListener("click", async () => {
+          await api("/owner/api/sketch-origin", { id: s.id, origin: s.origin === "own" ? "requested" : "own" });
+          load();
+        });
         const toggle = el("button", { className: "pin", textContent: s.public ? "Hide from website" : "Show on website" });
         toggle.addEventListener("click", async () => {
           await api("/owner/api/sketch-public", { id: s.id, public: !s.public });
@@ -244,8 +252,12 @@
             s.why ? el("div", { className: "why", textContent: s.why }) : null,
             el("div", { textContent: s.thoughts }),
             el("details", {}, el("summary", { textContent: "What her brush was given" }), el("p", { className: "when", textContent: s.prompt })),
-            el("div", {}, toggle)));
-      }) : [el("p", { className: "when", textContent: "No drawings yet." })]));
+            el("div", { className: "row" }, toggle, move)));
+      };
+      for (const origin of ["own", "requested"]) {
+        const list = data.sketches.filter((s) => s.origin === origin);
+        $("sketches-" + origin).replaceChildren(...(list.length ? list.map(card) : [el("p", { className: "when", textContent: "None yet." })]));
+      }
 
       $("appearance").replaceChildren(...(data.appearance.length ? data.appearance.map((a) => el("li", { textContent: a }))
         : [el("li", { className: "when", textContent: "She hasn't seen herself yet." })]));
