@@ -1,4 +1,4 @@
-﻿# Starts Delta for the website: voice server + gatekeeper + Cloudflare tunnel, then publishes
+﻿# Starts Delta for the website: voice server + brush + gatekeeper + Cloudflare tunnel, then publishes
 # the new tunnel address to config.json on GitHub Pages.
 # Run: right-click > "Run with PowerShell" (keep the window open while Delta is online).
 
@@ -9,6 +9,9 @@ $log = Join-Path $env:TEMP "delta-tunnel.log"
 
 Write-Host "Starting Delta's voice..."
 $voice = Start-Process "$repo\server\.venv\Scripts\python.exe" -ArgumentList "`"$repo\server\tts_server.py`"" -PassThru -WindowStyle Hidden
+
+Write-Host "Starting Delta's brush (sketchbook)..."
+$art = Start-Process "$repo\server\.venv-art\Scripts\python.exe" -ArgumentList "`"$repo\serverrt_server.py`"" -PassThru -WindowStyle Hidden
 
 Write-Host "Starting gatekeeper..."
 $gatekeeper = Start-Process node -ArgumentList "`"$repo\server\gatekeeper.js`"" -PassThru -WindowStyle Hidden
@@ -27,7 +30,7 @@ for ($i = 0; $i -lt 30 -and -not $url; $i++) {
 }
 if (-not $url) {
     Write-Host "Couldn't get a tunnel address. Check your internet connection." -ForegroundColor Red
-    Stop-Process -Id $voice.Id, $gatekeeper.Id, $tunnel.Id -ErrorAction SilentlyContinue
+    Stop-Process -Id $voice.Id, $art.Id, $gatekeeper.Id, $tunnel.Id -ErrorAction SilentlyContinue
     Read-Host "Press Enter to close"
     exit 1
 }
@@ -50,5 +53,5 @@ Read-Host "Press Enter to put Delta to sleep and take her offline"
 try { Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8787/owner/sleep-and-close" -TimeoutSec 5 | Out-Null } catch {}
 Wait-Process -Id $gatekeeper.Id -Timeout 10 -ErrorAction SilentlyContinue
 
-Stop-Process -Id $voice.Id, $gatekeeper.Id, $tunnel.Id -ErrorAction SilentlyContinue
+Stop-Process -Id $voice.Id, $art.Id, $gatekeeper.Id, $tunnel.Id -ErrorAction SilentlyContinue
 Write-Host "Delta is offline."

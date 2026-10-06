@@ -7,6 +7,7 @@
 // background; before each reply, the facts most related to the conversation are recalled
 // using nomic-embed-text.
 
+const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const { DatabaseSync } = require("node:sqlite");
@@ -95,7 +96,7 @@ db.exec(`
   );
   CREATE TABLE IF NOT EXISTS journal (
     id      INTEGER PRIMARY KEY,
-    kind    TEXT NOT NULL,          -- 'reflection', 'exploration' or 'diary'
+    kind    TEXT NOT NULL,          -- 'reflection', 'exploration', 'diary', 'review' or 'sketch'
     entry   TEXT NOT NULL,
     created INTEGER NOT NULL
   );
@@ -103,6 +104,17 @@ db.exec(`
 const journalColumns = new Set(db.prepare("PRAGMA table_info(journal)").all().map((c) => c.name));
 if (!journalColumns.has("topic")) db.exec("ALTER TABLE journal ADD COLUMN topic TEXT");     // where a roam went
 if (!journalColumns.has("sources")) db.exec("ALTER TABLE journal ADD COLUMN sources TEXT"); // pages she read (JSON)
+db.exec(`
+  CREATE TABLE IF NOT EXISTS sketches (
+    id       INTEGER PRIMARY KEY,
+    created  INTEGER NOT NULL,
+    title    TEXT NOT NULL,
+    why      TEXT NOT NULL,           -- her reason, before drawing
+    thoughts TEXT NOT NULL,           -- what she thought of it, after looking at it
+    prompt   TEXT NOT NULL,           -- what the brush was given
+    public   INTEGER NOT NULL DEFAULT 1
+  );
+`);
 const MAX_SAVED_MESSAGES = 200; // per visitor; older ones are dropped
 
 const MAX_PIN_FAILS = 5;
@@ -419,11 +431,12 @@ async function ask(messages, options, format) {
 
 // Her journal, in her own voice. Uses her personality prompt (plus what she already knows
 // about herself) so the writing is hers.
-async function writeInHerVoice(task) {
+// `images` (base64) are pictures she can see along with the task.
+async function writeInHerVoice(task, images) {
   const persona = await personaPrompt();
   const self = await selfSection("");
   return ask(
-    [{ role: "system", content: [persona, self].filter(Boolean).join("\n\n") }, { role: "user", content: task }],
+    [{ role: "system", content: [persona, self].filter(Boolean).join("\n\n") }, { role: "user", content: task, ...(images && { images }) }],
     { temperature: 0.7, num_predict: 260, repeat_penalty: 1.2 },
   );
 }
@@ -496,11 +509,12 @@ async function diaryIfDue(force = false) {
   const last = db.prepare("SELECT created FROM journal WHERE kind = 'diary' ORDER BY created DESC LIMIT 1").get()?.created || 0;
   if (!force && Date.now() - last < DIARY_EVERY_HOURS * 3600000) return false;
   const reflections = db.prepare(`SELECT kind, topic, entry FROM journal
-    WHERE kind IN ('reflection', 'exploration') AND created > ? ORDER BY created`)
-    .all(last).map((r) => (r.kind === "exploration" ? `(After reading about ${r.topic}) ${r.entry}` : r.entry));
+    WHERE kind IN ('reflection', 'exploration', 'sketch') AND created > ? ORDER BY created`)
+    .all(last).map((r) => (r.kind === "exploration" ? `(After reading about ${r.topic}) ${r.entry}`
+      : r.kind === "sketch" ? `(After drawing "${r.topic}") ${r.entry}` : r.entry));
   if (reflections.length < (force ? 1 : MIN_REFLECTIONS_FOR_DIARY)) return false;
 
-  const entry = await writeInHerVoice(`These are the private notes you wrote to yourself since your last diary entry (about conversations, and things you explored on your own):
+  const entry = await writeInHerVoice(`These are the private notes you wrote to yourself since your last diary entry (about conversations, things you explored on your own, and things you drew):
 
 ${reflections.slice(-8).map((r, i) => `(${i + 1}) ${r}`).join("\n\n")}
 
@@ -555,6 +569,9 @@ function startGrowing(isIdle) {
         if (!isIdle()) return;
         const trip = await roamIfDue(isIdle);
         if (trip) console.log(`Delta went roaming (${trip.how}): ${trip.stops.map((s) => s.title).join(" → ")}`);
+        if (!isIdle()) return;
+        const sketch = await sketchIfDue();
+        if (sketch) console.log(`Delta drew "${sketch.title}".`);
         if (!isIdle()) return;
         if (await diaryIfDue()) console.log("Delta wrote in her diary.");
         if (!isIdle()) return;
@@ -782,6 +799,165 @@ async function roamIfDue(stillFree) {
   return roam(undefined, stillFree);
 }
 
+// ---- Her sketchbook ----
+//
+// Now and then in her free time she's asked whether she feels like drawing. She can say no. If
+// she does, she chooses what, in what medium and why, from her mood and what's on her mind. Her
+// "brush" (art_server.py, on this PC) paints it, then she looks at the result (her model can see
+// images) and writes what she honestly thinks of it. A neutral check keeps anything unsuitable off
+// the public wall. Like her other free time, drawing gives way the moment someone needs her.
+
+const ART = "http://127.0.0.1:8789";
+const SKETCH_DIR = path.join(__dirname, "sketches"); // her drawings (git-ignored; served by the gatekeeper)
+const MAX_SKETCHES_PER_DAY = 4;
+// How often she's in the mood to draw follows how expressive and playful she is (~6 hours now).
+const sketchEveryHours = () => {
+  const t = personality().traits;
+  return 2 + (1 - (t.expressiveness + t.playfulness) / 200) * 6;
+};
+
+const ART_PROMPT = `You write prompts for an image generator (Stable Diffusion). You get an artist's plan for a drawing.
+Return JSON exactly like {"prompt": "..."}: one line, at most 50 words, comma-separated phrases: the concrete subject and setting first, then colours and light, then the medium and style from the plan. Only things that can be seen: turn feelings and ideas into visual metaphors. No words, letters or signatures in the picture. Nothing sexual or gory.`;
+
+const SAFETY_CHECK = `You check pictures before they go on a public website. Return JSON exactly like {"unsafe": false}.
+"unsafe" is true only if the picture shows nudity, sexual content, gore or graphic violence.`;
+
+// Stops the brush mid-picture (when someone needs her, or she's going to sleep).
+function stopDrawing() {
+  return fetch(`${ART}/cancel`, { method: "POST", signal: AbortSignal.timeout(2000) }).catch(() => {});
+}
+
+async function paint(prompt, signal) {
+  const onAbort = () => stopDrawing();
+  signal.addEventListener("abort", onAbort, { once: true });
+  try {
+    const res = await fetch(`${ART}/draw`, {
+      method: "POST",
+      body: JSON.stringify({ prompt, seed: crypto.randomInt(2 ** 31) }),
+      signal,
+    });
+    if (res.status === 409) throw Object.assign(new Error("Drawing interrupted"), { name: "AbortError" });
+    if (!res.ok) throw new Error(`Her brush returned ${res.status}`);
+    return Buffer.from(await res.arrayBuffer());
+  } catch (err) {
+    if (err.cause?.code === "ECONNREFUSED") throw new Error("Her brush (art_server.py) isn't running");
+    throw err;
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
+}
+
+// One drawing. Without `idea` she may decide she doesn't feel like it (returns null).
+// With `idea` (asked by you) she draws, taking the suggestion however she likes.
+async function sketch(idea) {
+  const p = personality();
+  const latest = db.prepare(`SELECT kind, topic, entry FROM journal WHERE kind IN ('diary', 'reflection', 'exploration')
+    ORDER BY created DESC LIMIT 1`).get();
+  const lastSketch = db.prepare("SELECT title FROM sketches ORDER BY created DESC LIMIT 1").get();
+  const context = [
+    p.today && `How you are today: ${p.today}`,
+    latest && `The last thing you wrote in your journal: "${latest.entry.replace(/\s+/g, " ").slice(0, 400)}"`,
+    lastSketch && `The last thing you drew was "${lastSketch.title}".`,
+  ].filter(Boolean).join("\n");
+  const form = `TITLE: <a short title>
+DRAW: <what you'll draw, so someone could picture it: the subject, the setting, the colours, the light>
+MEDIUM: <how you'll draw it, e.g. pencil, ink, watercolour, oil, charcoal, pastel, gouache, digital>
+WHY: <one or two sentences, in your own voice, about why this, now>`;
+
+  activity = "Thinking about what to draw";
+  try {
+    const plan = await writeInHerVoice(idea
+      ? `You have a quiet moment and your sketchbook. Someone suggested you draw: "${idea}". Take that however you like: literally, loosely, or as a starting point for something of your own.
+
+${context}
+
+Reply in exactly this form:
+${form}`
+      : `You have a quiet moment to yourself, and a sketchbook. Nobody asked you to draw: it's entirely up to you, and it doesn't have to be about anything you've been reading.
+
+${context}
+
+Do you feel like drawing something right now? If not, reply with only: NO
+If you do, reply in exactly this form:
+${form}`);
+
+    const field = (name) => plan.match(new RegExp(`^\\W*${name}\\W*:\\s*(.+)$`, "im"))?.[1]?.replace(/^["*]+|["*]+$/g, "").trim();
+    const [title, what, medium, why] = ["TITLE", "DRAW", "MEDIUM", "WHY"].map(field);
+    if (!what || !title) {
+      setMeta("last_sketch", Date.now()); // not in the mood: ask again another time
+      return null;
+    }
+
+    const { prompt } = JSON.parse(await ask(
+      [{ role: "system", content: ART_PROMPT }, { role: "user", content: `Plan: ${what}\nMedium: ${medium || "pencil sketch"}` }],
+      { temperature: 0.2, num_predict: 120 },
+      "json",
+    ));
+    if (typeof prompt !== "string" || !prompt.trim()) throw new Error("No prompt for her brush");
+
+    activity = `Drawing "${title.slice(0, 60)}"`;
+    const png = await paint(prompt.trim().slice(0, 600), growth.signal);
+    const image = png.toString("base64");
+
+    activity = `Looking at her drawing "${title.slice(0, 60)}"`;
+    const thoughts = await writeInHerVoice(`You just finished this drawing in your sketchbook (it's the picture attached). You meant to draw: "${what}" in ${medium || "pencil"}, because: "${why || "you felt like it"}".
+
+Look at what actually came out. In 2-4 sentences, in your own voice: what do you honestly think of it? Whether it came out the way you meant, what you like or don't, what it makes you feel. Don't describe it back like a caption.`, [image]);
+    const check = JSON.parse(await ask(
+      [{ role: "system", content: SAFETY_CHECK }, { role: "user", content: "Check this picture.", images: [image] }],
+      { temperature: 0, num_predict: 30 },
+      "json",
+    ));
+
+    const created = Date.now();
+    const { lastInsertRowid: id } = db.prepare(`INSERT INTO sketches (created, title, why, thoughts, prompt, public)
+      VALUES (?, ?, ?, ?, ?, ?)`).run(created, title.slice(0, 100), (why || "").slice(0, 500), thoughts, prompt, check.unsafe ? 0 : 1);
+    fs.mkdirSync(SKETCH_DIR, { recursive: true });
+    fs.writeFileSync(path.join(SKETCH_DIR, `${id}.png`), png);
+    db.prepare("INSERT INTO journal (kind, entry, created, topic, sources) VALUES ('sketch', ?, ?, ?, ?)")
+      .run(`${why ? `${why}\n\n` : ""}${thoughts}`, created, title.slice(0, 100), JSON.stringify({ sketch: Number(id) }));
+    setMeta("last_sketch", created);
+    await storeSelfNotes(await notesFromJournal(thoughts), "sketch");
+    return { id: Number(id), title, why, thoughts, prompt, public: !check.unsafe };
+  } finally {
+    activity = null;
+  }
+}
+
+async function sketchIfDue() {
+  if (Date.now() - Number(getMeta("last_sketch") || 0) < sketchEveryHours() * 3600000) return null;
+  const today = db.prepare("SELECT COUNT(*) AS n FROM sketches WHERE created > ?").get(Date.now() - 24 * 3600000).n;
+  if (today >= MAX_SKETCHES_PER_DAY) return null;
+  const brush = await fetch(`${ART}/health`, { signal: AbortSignal.timeout(2000) }).catch(() => null);
+  if (!brush?.ok) return null; // her brush isn't running: no drawing today
+  return sketch();
+}
+
+// A drawing right now (asked for by you), queued with her other background thinking.
+function sketchNow(idea) {
+  const drawing = queue.then(() => sketch(String(idea || "").trim().slice(0, 200) || "anything you like"));
+  queue = drawing.catch(() => {});
+  return drawing;
+}
+
+// Her sketchbook: for the website only the public ones; for you, everything.
+function sketches({ all = false, limit = 60 } = {}) {
+  return db.prepare(`SELECT id, created, title, why, thoughts${all ? ", prompt, public" : ""} FROM sketches
+    ${all ? "" : "WHERE public = 1"} ORDER BY created DESC LIMIT ?`).all(limit);
+}
+
+// The image file for a drawing, or null if it doesn't exist (or isn't public, unless `all`).
+function sketchFile(id, all = false) {
+  const row = db.prepare("SELECT public FROM sketches WHERE id = ?").get(Number(id));
+  if (!row || (!all && !row.public)) return null;
+  const file = path.join(SKETCH_DIR, `${Number(id)}.png`);
+  return fs.existsSync(file) ? file : null;
+}
+
+function setSketchPublic(id, isPublic) {
+  db.prepare("UPDATE sketches SET public = ? WHERE id = ?").run(isPublic ? 1 : 0, Number(id));
+}
+
 function selfNotes() {
   return db.prepare("SELECT text, source, created FROM self_notes ORDER BY created").all();
 }
@@ -966,7 +1142,7 @@ async function reviewPersonality(force = false) {
   // A review you ask for always looks back over the past week, even if she reviewed recently.
   const since = force ? Math.min(last || Date.now(), Date.now() - REVIEW_EVERY_DAYS * 86400000) : last;
   const entries = db.prepare(`SELECT kind, topic, entry FROM journal
-    WHERE kind IN ('diary', 'reflection', 'exploration') AND created > ? ORDER BY created DESC LIMIT 12`).all(since).reverse();
+    WHERE kind IN ('diary', 'reflection', 'exploration', 'sketch') AND created > ? ORDER BY created DESC LIMIT 12`).all(since).reverse();
   if (entries.length < (force ? 1 : MIN_ENTRIES_FOR_REVIEW)) return null;
 
   const p = personality();
@@ -1119,4 +1295,5 @@ module.exports = {
   personaPrompt, selfSection, startGrowing, reflectIfDue, diaryIfDue, journal, selfNotes, roam, explorations,
   sleepState, fallAsleep, wakeUp, settle, close, lastTalk, interruptGrowth, roamNow,
   personalityReport, reviewPersonality, reviewNow, undoLastChange, setPinned, behavior,
+  sketchNow, sketches, sketchFile, setSketchPublic, stopDrawing,
 };

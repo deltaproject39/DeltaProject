@@ -196,9 +196,15 @@ function handleOwner(req, res) {
       ...memory.personalityReport(),
       selfNotes: memory.selfNotes(),
       journal: memory.journal(40),
+      sketches: memory.sketches({ all: true }),
       sleep: memory.sleepState(),
       now: memory.explorations(1).now,
     });
+    return true;
+  }
+  const drawing = req.method === "GET" && req.url.match(/^\/owner\/sketches\/(\d+)\.png$/);
+  if (drawing) {
+    sendSketch(res, memory.sketchFile(drawing[1], true), {});
     return true;
   }
   if (req.method !== "POST" || !req.url.startsWith("/owner/api/")) return false;
@@ -212,6 +218,8 @@ function handleOwner(req, res) {
         case "/owner/api/pin": memory.setPinned(msg.trait, Boolean(msg.pinned)); return send(res, 200, { ok: true });
         case "/owner/api/sleep": memory.fallAsleep("manual"); return send(res, 200, { ok: true });
         case "/owner/api/wake": memory.wakeUp(); return send(res, 200, { ok: true });
+        case "/owner/api/sketch": return send(res, 200, { sketch: await memory.sketchNow(msg.idea) });
+        case "/owner/api/sketch-public": memory.setSketchPublic(msg.id, Boolean(msg.public)); return send(res, 200, { ok: true });
         default: return send(res, 404, { error: "Not found" });
       }
     } catch (err) {
@@ -249,6 +257,7 @@ async function greet(res, cors, body) {
       .map((m) => ({ role: m.role === "user" ? "user" : "assistant", content: m.content.slice(0, MAX_MESSAGE_CHARS) }));
     const last = memory.lastTalk(visitor);
     const trip = memory.explorations(1).trips[0];
+    const drew = memory.sketches({ limit: 1 })[0];
 
     const situation = last
       ? `This person just came back to the chat. You last talked ${ago(Date.now() - last)} ago.`
@@ -257,7 +266,9 @@ async function greet(res, cors, body) {
         : "Someone new just opened the chat for the first time. You don't know them yet.";
     const freeTime = trip && Date.now() - trip.created < 2 * 86400000 && Math.random() < 0.6
       ? ` If it feels natural, you could mention something from your own free time: you recently read about ${trip.path}.`
-      : "";
+      : drew && Date.now() - drew.created < 2 * 86400000 && Math.random() < 0.5
+        ? ` If it feels natural, you could mention that you recently drew something in your sketchbook: "${drew.title}".`
+        : "";
     const system = [persona, self, notes.length ? memory.note(notes) : ""].filter(Boolean).join("\n\n");
     const messages = [
       ...(system ? [{ role: "system", content: system }] : []),
@@ -285,6 +296,13 @@ async function greet(res, cors, body) {
   } finally {
     active--;
   }
+}
+
+// One of her drawings (a PNG), or 404.
+function sendSketch(res, file, cors) {
+  if (!file) return send(res, 404, { error: "Not found" }, cors);
+  res.writeHead(200, { "Content-Type": "image/png", "Cache-Control": "public, max-age=86400", ...cors });
+  fs.createReadStream(file).pipe(res);
 }
 
 function send(res, status, obj, headers = {}) {
@@ -332,6 +350,13 @@ const server = http.createServer((req, res) => {
   if (req.method === "GET" && req.url === "/roam") {
     return send(res, 200, memory.explorations(), cors);
   }
+
+  // Her public sketchbook: the drawings she made in her free time and what she thought of them.
+  if (req.method === "GET" && req.url === "/sketches") {
+    return send(res, 200, memory.sketches(), cors);
+  }
+  const drawing = req.method === "GET" && req.url.match(/^\/sketches\/(\d+)\.png$/);
+  if (drawing) return sendSketch(res, memory.sketchFile(drawing[1]), cors);
 
   if (req.method === "GET" && req.url === "/health") {
     return send(res, 200, { ok: true, model: MODEL, asleep: memory.sleepState().asleep }, cors);
@@ -514,6 +539,7 @@ async function goToSleep(why) {
   console.log(`\nDelta is going to sleep (${why})...`);
   server.close();
   memory.fallAsleep("shutdown");
+  memory.stopDrawing();
   await memory.settle(6000);
   memory.close();
   console.log("Delta is asleep. Everything she knows is saved.");

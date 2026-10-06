@@ -84,6 +84,13 @@
     ul.notes { margin: 0; padding-left: 18px; }
     ul.notes li { margin: 3px 0; }
     #status { min-height: 1.3em; color: var(--muted); font-size: 0.9rem; }
+    .sketches { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; margin-top: 12px; }
+    .sketch { border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--bg); }
+    .sketch.hidden img { opacity: 0.35; }
+    .sketch img { display: block; width: 100%; aspect-ratio: 1; object-fit: cover; }
+    .sketch .about { padding: 10px 12px; display: grid; gap: 6px; font-size: 0.88rem; }
+    .sketch .title { font-weight: 700; }
+    .sketch .why { font-style: italic; color: var(--muted); }
   </style>
 </head>
 <body>
@@ -128,6 +135,16 @@
         <input id="roam-topic" placeholder="A topic, or leave empty to let her choose">
         <button id="roam">Go</button>
       </div>
+    </section>
+
+    <section>
+      <h2>Her sketchbook</h2>
+      <p class="when">She draws in her free time when she feels like it (about every few hours, and she can say no). Hidden drawings stay off the website.</p>
+      <div class="row">
+        <input id="sketch-idea" placeholder="Suggest something, or leave empty to let her choose">
+        <button id="sketch">Ask her to draw</button>
+      </div>
+      <div class="sketches" id="sketches"></div>
     </section>
 
     <section>
@@ -206,7 +223,24 @@
       $("self-notes").replaceChildren(...[...data.selfNotes].reverse().map((n) =>
         el("li", {}, n.text, " ", el("span", { className: "when", textContent: `(${n.source}, ${when(n.created)})` }))));
 
-      const kinds = { all: "All", diary: "Diary", reflection: "Reflections", exploration: "Roaming", review: "Looking back" };
+      $("sketches").replaceChildren(...(data.sketches.length ? data.sketches.map((s) => {
+        const toggle = el("button", { className: "pin", textContent: s.public ? "Hide from website" : "Show on website" });
+        toggle.addEventListener("click", async () => {
+          await api("/owner/api/sketch-public", { id: s.id, public: !s.public });
+          load();
+        });
+        return el("div", { className: "sketch" + (s.public ? "" : " hidden") },
+          el("a", { href: `/owner/sketches/${s.id}.png`, target: "_blank" }, el("img", { src: `/owner/sketches/${s.id}.png`, alt: s.title, loading: "lazy" })),
+          el("div", { className: "about" },
+            el("div", { className: "title", textContent: s.title }),
+            el("div", { className: "when", textContent: when(s.created) + (s.public ? "" : " · hidden") }),
+            s.why ? el("div", { className: "why", textContent: s.why }) : null,
+            el("div", { textContent: s.thoughts }),
+            el("details", {}, el("summary", { textContent: "What her brush was given" }), el("p", { className: "when", textContent: s.prompt })),
+            el("div", {}, toggle)));
+      }) : [el("p", { className: "when", textContent: "No drawings yet." })]));
+
+      const kinds = { all: "All", diary: "Diary", reflection: "Reflections", exploration: "Roaming", sketch: "Sketchbook", review: "Looking back" };
       $("tabs").replaceChildren(...Object.entries(kinds).map(([k, label]) => {
         const b = el("button", { className: k === tab ? "on" : "", textContent: label });
         b.addEventListener("click", () => { tab = k; render(); });
@@ -263,6 +297,12 @@
       if (!result.trip) return "She couldn't find anything to read this time.";
       $("roam-topic").value = "";
       return `She went: ${result.trip.stops.map((s) => s.title).join(" → ")}`;
+    }));
+
+    $("sketch").addEventListener("click", (e) => action(e.target, "She's drawing... (about a minute)", async () => {
+      const { sketch } = await api("/owner/api/sketch", { idea: $("sketch-idea").value.trim() || undefined });
+      $("sketch-idea").value = "";
+      return `She drew "${sketch.title}".${sketch.public ? "" : " (Kept off the website: it didn't pass the check.)"}`;
     }));
 
     load();

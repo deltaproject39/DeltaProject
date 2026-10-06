@@ -128,6 +128,13 @@
       cursor: pointer;
     }
     .icon-btn:hover { background: var(--bg-glow); filter: none; }
+    .header-actions { flex-shrink: 0; }
+    @media (max-width: 520px) {
+      .header-inner { gap: 8px; }
+      .header-actions { gap: 4px; }
+      .icon-btn { padding: 6px 7px; font-size: 1.05rem; }
+      .badge { display: none; }
+    }
 
     /* Layout: character stage + conversation */
     .app {
@@ -293,6 +300,16 @@
     .trip-path a:hover { text-decoration: underline; }
     .trip-entry { margin-top: 8px !important; font-size: 0.9rem; line-height: 1.55; white-space: pre-wrap; }
 
+    /* Sketchbook dialog */
+    .sketch-sheet { width: min(720px, calc(100% - 32px)); }
+    #sketch-list { max-height: 65vh; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
+    #sketch-list > .sub { grid-column: 1 / -1; }
+    .drawing { margin: 0; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+    .drawing img { display: block; width: 100%; aspect-ratio: 1; object-fit: cover; background: var(--bg-glow); }
+    .drawing figcaption { padding: 10px 12px; display: grid; gap: 6px; font-size: 0.85rem; line-height: 1.5; }
+    .drawing .drawing-title { font-weight: 700; font-size: 0.92rem; }
+    .drawing .drawing-why { font-style: italic; color: var(--muted); }
+
     /* Sleepy "z"s floating up while Delta is offline */
     .zzz-layer { position: absolute; top: 16%; left: 62%; pointer-events: none; }
     .zzz-layer span { position: absolute; opacity: 0; color: var(--dawn-1); font-weight: 700; }
@@ -450,6 +467,7 @@
       </div>
       <div class="header-actions">
         <button type="button" class="icon-btn" id="roam-toggle" title="Where Delta's been" aria-label="Where Delta's been">🌍</button>
+        <button type="button" class="icon-btn" id="sketch-toggle" title="Delta's sketchbook" aria-label="Delta's sketchbook">🎨</button>
         <button type="button" class="icon-btn" id="memory-toggle" title="What Delta remembers" aria-label="What Delta remembers">🧠</button>
         <button type="button" class="icon-btn" id="voice-toggle">🔊</button>
       </div>
@@ -489,6 +507,16 @@
     <div id="roam-list"></div>
     <div class="sheet-actions">
       <button type="button" class="plain" id="roam-close" style="margin-left:auto">Close</button>
+    </div>
+  </dialog>
+
+  <dialog class="sheet sketch-sheet" id="sketch-dialog" aria-labelledby="sketch-title">
+    <h2 id="sketch-title">🎨 Delta's sketchbook</h2>
+    <p class="sub">When she feels like it, she draws in her free time: what, how and why are up to her.
+      Then she looks at what came out and says what she honestly thinks of it.</p>
+    <div id="sketch-list"></div>
+    <div class="sheet-actions">
+      <button type="button" class="plain" id="sketch-close" style="margin-left:auto">Close</button>
     </div>
   </dialog>
 
@@ -1626,6 +1654,60 @@
       document.getElementById("roam-close").addEventListener("click", () => dialog.close());
 
       return { fetchRoam };
+    })();
+
+    // ---- Sketchbook: the drawings Delta made on her own, and what she thought of them ----
+    (() => {
+      const dialog = document.getElementById("sketch-dialog");
+      const listEl = document.getElementById("sketch-list");
+      const when = (ms) => new Date(ms).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+      const note = (text) => {
+        const p = document.createElement("p");
+        p.className = "sub";
+        p.textContent = text;
+        return p;
+      };
+
+      async function render() {
+        let sketches = null;
+        try {
+          const res = deltaServer && await fetch(deltaServer + "/sketches", { cache: "no-store" });
+          if (res && res.ok) sketches = await res.json();
+        } catch {}
+        if (!sketches) return listEl.replaceChildren(note("Delta is offline right now, so her sketchbook is closed."));
+        if (sketches.length === 0) return listEl.replaceChildren(note("Her sketchbook is still empty. She draws when she feels like it."));
+        listEl.replaceChildren(...sketches.map((s) => {
+          const fig = document.createElement("figure");
+          fig.className = "drawing";
+          const link = document.createElement("a");
+          link.href = `${deltaServer}/sketches/${s.id}.png`;
+          link.target = "_blank";
+          link.rel = "noopener";
+          const img = document.createElement("img");
+          img.src = link.href;
+          img.alt = s.title;
+          img.loading = "lazy";
+          link.append(img);
+          const caption = document.createElement("figcaption");
+          const parts = [["drawing-title", s.title], ["trip-when", when(s.created)], ["drawing-why", s.why], ["", s.thoughts]];
+          for (const [cls, text] of parts) {
+            if (!text) continue;
+            const line = document.createElement("span");
+            line.className = cls;
+            line.textContent = text;
+            caption.append(line);
+          }
+          fig.append(link, caption);
+          return fig;
+        }));
+      }
+
+      document.getElementById("sketch-toggle").addEventListener("click", () => {
+        listEl.replaceChildren(note("Loading..."));
+        dialog.showModal();
+        render();
+      });
+      document.getElementById("sketch-close").addEventListener("click", () => dialog.close());
     })();
 
     // ---- Voice: Delta speaks her replies through the voice server on the owner's PC ----
