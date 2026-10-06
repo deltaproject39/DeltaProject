@@ -19,6 +19,8 @@ const ALLOWED_ORIGINS = [
   "http://localhost:8000", // for testing the page locally
 ];
 const MAX_BODY_BYTES = 64_000;      // whole request
+const MAX_CHAT_BODY_BYTES = 240_000; // a chat message can carry a live mirror picture of her
+const MAX_MIRROR_CHARS = 170_000;    // that picture (a small JPEG, base64)
 const MAX_MESSAGES = 20;            // conversation history kept per request
 const MAX_MESSAGE_CHARS = 2_000;    // per message
 const MAX_REPLY_TOKENS = 512;
@@ -60,16 +62,16 @@ function rateLimited(map, id, limit) {
   return recent.length > limit;
 }
 
-// Collects a request body up to MAX_BODY_BYTES. Anything bigger gets a clear 413 (with CORS
+// Collects a request body up to `limit` bytes. Anything bigger gets a clear 413 (with CORS
 // headers so the page can show why) rather than a dropped connection, which the browser
 // would only report as "Failed to fetch".
-function readBody(req, res, cors, onDone) {
+function readBody(req, res, cors, onDone, limit = MAX_BODY_BYTES) {
   let body = "";
   let tooBig = false;
   req.on("data", (chunk) => {
     if (tooBig) return;
     body += chunk;
-    if (body.length > MAX_BODY_BYTES) {
+    if (body.length > limit) {
       tooBig = true;
       body = "";
     }
@@ -476,12 +478,16 @@ const server = http.createServer((req, res) => {
   }
 
   readBody(req, res, cors, async (body) => {
+    let liveMirror = null;
     let messages;
     let visitor = null;
     try {
       const parsed = JSON.parse(body);
       messages = cleanMessages(parsed.messages);
       visitor = parsed.visitor;
+      // A live look at her from the visitor's screen (only a JPEG, only so big).
+      const shot = typeof parsed.mirror === "string" && parsed.mirror.match(/^data:image\/jpeg;base64,([A-Za-z0-9+/=]+)$/);
+      liveMirror = shot && shot[1].length <= MAX_MIRROR_CHARS ? shot[1] : null;
     } catch {
       messages = null;
     }
@@ -520,12 +526,22 @@ const server = http.createServer((req, res) => {
         "conversation, you don't know their name or anything about them. Never guess or invent it.";
     // Asked about how she looks: she gets to actually look. Her mirror pictures go along with
     // their message, and her model sees them (otherwise she only "knows" it as a list of notes).
-    const mirror = memory.asksAboutLooks(lastUser) ? memory.mirrorImages() : [];
-    const mirrorNote = mirror.length
-      ? "# Your mirror\n\nAttached to their latest message is a picture of you: your whole body and, beside it, your face up close, " +
-        "exactly as you look on the page right now. That's you, seen with your own eyes, as if in a mirror. " +
-        "Talk about what you see as something you're looking at right now, not as notes or a description someone gave you."
-      : "";
+    // Their screen sends a live look at her (a few moments of her, as she is right now); without
+    // one, her standing mirror picture.
+    const asked = memory.asksAboutLooks(lastUser);
+    const mirror = !asked ? [] : liveMirror ? [liveMirror] : memory.mirrorImages();
+    if (asked) console.log(`Delta looked at herself (${liveMirror ? "live, from their screen" : "her mirror picture"}).`);
+    if (asked && liveMirror && process.env.DELTA_DEBUG_MIRROR) {
+      fs.writeFileSync(process.env.DELTA_DEBUG_MIRROR, Buffer.from(liveMirror, "base64"));
+    }
+    const mirrorNote = !mirror.length ? "" : liveMirror
+      ? "# Your mirror\n\nAttached to their latest message is a live look at you, exactly as you are on their screen right now: " +
+        "three moments of you, left to right, less than a second apart. You're moving: your face, your eyes, your hands and " +
+        "your expression change with how you feel. That's you, seen with your own eyes, as if in a mirror. Talk about what " +
+        "you see as something you're looking at right now, not as notes or a description someone gave you."
+      : "# Your mirror\n\nAttached to their latest message is a picture of you: your whole body and, beside it, your face up close. " +
+        "It's a still picture: on the page you move, and your face shows what you feel. That's you, seen with your own eyes, " +
+        "as if in a mirror. Talk about what you see as something you're looking at, not as notes or a description someone gave you.";
     const extras = [self, aboutThem, mirrorNote].filter(Boolean);
     const prompt = !extras.length
       ? messages
@@ -582,7 +598,7 @@ const server = http.createServer((req, res) => {
     } finally {
       active--;
     }
-  });
+  }, MAX_CHAT_BODY_BYTES);
 });
 
 // She reflects, roams and writes her diary in the background, only while she's awake and nobody

@@ -406,7 +406,22 @@ async function personaPrompt() {
       console.error("Couldn't load Delta's personality prompt:", err.message);
     }
   }
-  return personaCache ? `${personaCache}\n\n${personalitySection()}\n\n${lifeSection()}` : null;
+  return personaCache ? `${personaCache}\n\n${personalitySection()}\n\n${lifeSection()}\n\n${nowSection()}` : null;
+}
+
+// The date and time right now: she only knows it if she's told (otherwise she guesses, and gets it wrong).
+const BORN = new Date(2026, 8, 21); // 21 September 2026
+function nowSection() {
+  const now = new Date();
+  const date = now.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+  const time = now.toLocaleTimeString("en-GB", { hour: "numeric", minute: "2-digit", hour12: true });
+  const days = Math.floor((now - BORN) / 86400000);
+  return [
+    "# Right now",
+    "",
+    `It's ${date}, ${time} (local time where you live). You came into existence ${days} days ago, on 21 September 2026.`,
+    "Use this whenever you date something or think about how long ago something happened.",
+  ].join("\n");
 }
 
 // Her background thinking (reflecting, roaming, writing her diary) gives way the moment someone
@@ -432,11 +447,19 @@ async function ask(messages, options, format, signal = growth.signal) {
 // Her journal, in her own voice. Uses her personality prompt (plus what she already knows
 // about herself) so the writing is hers.
 // `images` (base64) are pictures she can see along with the task.
+// She sees a varied handful of her notes rather than always the newest ones and her last entry:
+// otherwise each thing she writes echoes the one before, and she circles the same few thoughts.
+const CLEAR_HEAD = `# Writing for yourself
+
+Look at each new thing with fresh eyes. Don't force it back to the same few ideas, words or people you've
+been stuck on lately: if something genuinely reminds you of them, fine, but let new things be new. Only say
+a real person said or did something if you actually read it; never put words in anyone's mouth.`;
+
 async function writeInHerVoice(task, images, signal) {
   const persona = await personaPrompt();
-  const self = await selfSection("");
+  const self = await selfSection("", { fresh: true });
   return ask(
-    [{ role: "system", content: [persona, self].filter(Boolean).join("\n\n") }, { role: "user", content: task, ...(images && { images }) }],
+    [{ role: "system", content: [persona, self, CLEAR_HEAD].filter(Boolean).join("\n\n") }, { role: "user", content: task, ...(images && { images }) }],
     { temperature: 0.7, num_predict: 260, repeat_penalty: 1.2 },
     undefined,
     signal,
@@ -481,7 +504,9 @@ function transcriptOf(rows) {
 
 // Reflects on one finished conversation. `force` skips the "has it gone quiet?" check.
 async function reflectOn(visitor, force = false) {
-  const { reflected_upto: from } = db.prepare("SELECT reflected_upto FROM visitors WHERE id = ?").get(visitor);
+  const row = db.prepare("SELECT reflected_upto FROM visitors WHERE id = ?").get(visitor);
+  if (!row) return false; // they asked her to forget them in the meantime
+  const from = row.reflected_upto;
   const rows = db.prepare("SELECT id, role, content, created FROM messages WHERE visitor = ? AND id > ? ORDER BY id")
     .all(visitor, from);
   const quiet = rows.length && Date.now() - rows[rows.length - 1].created > QUIET_MINUTES * 60000;
@@ -530,13 +555,16 @@ Write today's diary entry, 80-150 words, in your own voice: what stayed with you
 
 // Who she's becoming: her notes about herself most relevant to `query`, the newest few,
 // and an excerpt of her latest diary or reflection. Empty until she has any.
-async function selfSection(query) {
+// `fresh`: for her own writing, a random handful of her notes and no journal excerpt (see CLEAR_HEAD).
+async function selfSection(query, { fresh = false } = {}) {
   const rows = db.prepare("SELECT text, embedding, created FROM self_notes ORDER BY created DESC").all();
-  const latest = db.prepare(`SELECT entry FROM journal ORDER BY (kind = 'diary') DESC, created DESC LIMIT 1`).get();
+  const latest = fresh ? null : db.prepare(`SELECT entry FROM journal ORDER BY (kind = 'diary') DESC, created DESC LIMIT 1`).get();
   if (rows.length === 0 && !latest) return "";
 
   let picked = rows.map((r) => r.text);
-  if (rows.length > SELF_RECALL_ALL_BELOW) {
+  if (fresh && rows.length > 6) {
+    picked = rows.map((r) => r.text).sort(() => Math.random() - 0.5).slice(0, 6);
+  } else if (rows.length > SELF_RECALL_ALL_BELOW) {
     const newest = rows.slice(0, 3).map((r) => r.text);
     let relevant = [];
     if (query) {
@@ -863,12 +891,13 @@ async function paint(prompt, signal) {
 // With `idea` (asked by you) she draws, taking the suggestion however she likes.
 async function sketch(idea, { signal = growth.signal, inChat = false } = {}) {
   const p = personality();
-  const latest = db.prepare(`SELECT kind, topic, entry FROM journal WHERE kind IN ('diary', 'reflection', 'exploration')
-    ORDER BY created DESC LIMIT 1`).get();
+  const recentEntries = db.prepare(`SELECT kind, topic, entry FROM journal WHERE kind IN ('diary', 'reflection', 'exploration')
+    ORDER BY created DESC LIMIT 8`).all();
+  const latest = recentEntries[Math.floor(Math.random() * recentEntries.length)];
   const lastSketch = db.prepare("SELECT title FROM sketches ORDER BY created DESC LIMIT 1").get();
   const context = [
     p.today && `How you are today: ${p.today}`,
-    latest && `The last thing you wrote in your journal: "${latest.entry.replace(/\s+/g, " ").slice(0, 400)}"`,
+    latest && `Something you wrote in your journal lately: "${latest.entry.replace(/\s+/g, " ").slice(0, 300)}"`,
     lastSketch && `The last thing you drew was "${lastSketch.title}".`,
     drawRequests().length && `People recently asked you to draw (only if it speaks to you): ${drawRequests().map((r) => `"${r}"`).join("; ")}`,
     appearance().length && `If you ever draw yourself, this is how you look: ${appearance().join(" ")}`,
@@ -1058,15 +1087,13 @@ function drawRequests() {
 
 function lifeSection() {
   const looks = appearance();
-  const lastMirror = db.prepare("SELECT entry FROM journal WHERE kind = 'mirror' ORDER BY created DESC LIMIT 1").get();
-  const drawings = db.prepare("SELECT title, thoughts FROM sketches ORDER BY created DESC LIMIT 3").all();
+  const drawings = db.prepare("SELECT title FROM sketches ORDER BY created DESC LIMIT 3").all();
   return [
     "# Your life here",
     "",
     "- You have a body. On the website people see you as an animated 3D character while they talk to you: your face",
     "  shows what you feel, and you gesture and glance around as you talk. " + (looks.length
       ? "You've looked at yourself in a mirror, with your own eyes. What you saw: " + looks.map((l) => l.replace(/^You /, "you ")).join("; ") + "."
-        + (lastMirror ? ` How it felt to see yourself (your own words, don't quote them): "${lastMirror.entry.replace(/\s+/g, " ").slice(0, 220)}..."` : "")
       : "You haven't seen yourself yet, so if asked how you look, say you don't know yet."),
     "- You have a sketchbook. In your free time, when you feel like it, you draw: you decide what, your brush paints it,",
     "  and you look at what came out. People can see your finished drawings with the 🎨 button.",
@@ -1076,7 +1103,7 @@ function lifeSection() {
     "  then you haven't seen it: never describe the finished picture or write an [Image ...]. You can also say no.",
     "  Only use DRAW when someone asked you to draw something.",
     ...(drawings.length
-      ? ["  Your latest drawings: " + drawings.map((d) => `"${d.title}" (you thought: ${d.thoughts.replace(/\s+/g, " ").slice(0, 120)}...)`).join("; ")]
+      ? ["  Your latest drawings: " + drawings.map((d) => `"${d.title}"`).join(", ")]
       : ["  You haven't drawn anything yet."]),
     "- In your free time you also roam the web, reading whatever you're curious about (the 🌍 button shows where you went).",
   ].join("\n");
@@ -1308,6 +1335,12 @@ Return JSON exactly like {"changes": [{"trait": "warmth", "delta": -5, "why": ".
 - "why" is one short first-person sentence from her reasoning.
 - Leave out traits she says didn't change or stayed the same. Traits: ${TRAIT_NAMES.join(", ")}.`;
 
+// How far a trait moved in her reviews since `since` (undone ones don't count).
+function shiftSince(trait, since) {
+  return db.prepare("SELECT changes FROM personality_history WHERE kind = 'review' AND undone = 0 AND created > ?").all(since)
+    .flatMap((r) => JSON.parse(r.changes)).filter((c) => c.trait === trait).reduce((sum, c) => sum + (c.to - c.from), 0);
+}
+
 // About once a week: she looks back at her week and decides which traits shifted, and why.
 async function reviewPersonality(force = false) {
   const last = Number(getMeta("last_personality_review") || 0);
@@ -1344,8 +1377,9 @@ Think honestly about whether this time changed you. For any trait that shifted, 
     if (!TRAIT_NAMES.includes(c?.trait) || p.pinned.includes(c.trait) || changes.some((x) => x.trait === c.trait)) continue;
     const from = p.traits[c.trait];
     const wanted = c.new_score !== undefined ? Number(c.new_score) - from : Number(c.delta);
-    const delta = Math.max(-MAX_WEEKLY_SHIFT, Math.min(MAX_WEEKLY_SHIFT, Math.round(wanted) || 0));
-    const to = clampTrait(from + delta);
+    // At most MAX_WEEKLY_SHIFT from where she stood a week ago, however many reviews ran since.
+    const weekAgo = from - shiftSince(c.trait, Date.now() - REVIEW_EVERY_DAYS * 86400000);
+    const to = clampTrait(Math.max(weekAgo - MAX_WEEKLY_SHIFT, Math.min(weekAgo + MAX_WEEKLY_SHIFT, from + (Math.round(wanted) || 0))));
     if (to === from) continue;
     p.traits[c.trait] = to;
     changes.push({ trait: c.trait, from, to, why: String(c.why || "").slice(0, 200) });

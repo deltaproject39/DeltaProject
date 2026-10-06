@@ -689,6 +689,37 @@
       const viewport = document.getElementById("viewport");
       const canvas = document.getElementById("character-canvas");
       const moodEl = document.getElementById("mood");
+      let frameWanted = null; // set by mirror(): called with the canvas right after the next render
+
+      // A live look at her for her mirror: a few moments of her as she is right now (face,
+      // expression, pose), side by side, left to right. A JPEG data URL, or null.
+      async function mirror(count = 3, gapMs = 700) {
+        if (!canvas.width || !canvas.height) return null;
+        const h = 448;
+        const w = Math.min(300, Math.round((h * canvas.width) / canvas.height));
+        const strip = document.createElement("canvas");
+        strip.width = w * count;
+        strip.height = h;
+        const ctx = strip.getContext("2d");
+        ctx.fillStyle = getComputedStyle(document.body).backgroundColor || "#fff";
+        ctx.fillRect(0, 0, strip.width, strip.height);
+        for (let i = 0; i < count; i++) {
+          if (i) await new Promise((r) => setTimeout(r, gapMs));
+          const got = await Promise.race([
+            new Promise((resolve) => { frameWanted = resolve; }),
+            new Promise((resolve) => setTimeout(() => resolve(null), 2000)), // tab hidden: no frames
+          ]);
+          if (!got) { frameWanted = null; return null; }
+          // Head to waist, so her face and expression are big enough to see.
+          const c = got.canvas;
+          let srcH = c.height * 0.6;
+          let srcW = (srcH * w) / h;
+          if (srcW > c.width) { srcW = c.width; srcH = (srcW * h) / w; }
+          const top = Math.max(0, Math.min(c.height - srcH, got.headY * c.height - srcH * 0.32));
+          ctx.drawImage(c, (c.width - srcW) / 2, top, srcW, srcH, i * w, 0, w, h);
+        }
+        return strip.toDataURL("image/jpeg", 0.75);
+      }
       const moods = {
         sleeping: "zzz...",
         idle: "",
@@ -843,7 +874,9 @@
         scene.updateMatrixWorld(true);
 
         const headPos = new THREE.Vector3();
-        vrm.humanoid.getRawBoneNode("head").getWorldPosition(headPos);
+        const headNode = vrm.humanoid.getRawBoneNode("head");
+        const headNow = new THREE.Vector3(); // her head on screen, for mirror frames
+        headNode.getWorldPosition(headPos);
         const focusY = headPos.y - 0.13; // face down to the chest, so gestures stay in view
 
         const lookTarget = new THREE.Object3D();
@@ -1058,6 +1091,13 @@
 
           vrm.update(dt); // also runs her hair and clothing physics
           renderer.render(scene, camera);
+          // A mirror frame has to be copied right after rendering, while the picture is still there.
+          if (frameWanted) {
+            const take = frameWanted;
+            frameWanted = null;
+            headNow.setFromMatrixPosition(headNode.matrixWorld).project(camera);
+            take({ canvas, headY: (1 - headNow.y) / 2 }); // where her head is, 0 (top) to 1 (bottom)
+          }
           requestAnimationFrame(frame);
         }
         requestAnimationFrame(frame);
@@ -1070,6 +1110,7 @@
 
       return {
         set,
+        mirror,
         get state() { return state; },
         // While the visitor types, Delta perks up.
         listen() {
@@ -1377,11 +1418,17 @@
       return recent;
     }
 
+    // Asked about how she looks? Then she gets a live look at herself (her mirror), as she is on
+    // your screen right now. (Same test as her server's.)
+    const ABOUT_LOOKS = /\b(how (do|does) (you|she) look|(you|she) looks? like|your (hair|eyes?|face|outfit|clothes|body|avatar|appearance|style|tie|shirt|shorts|look)|appearance|mirror|(see|look at|describe|draw) yourself|what (are|r) you wearing|picture of you)\b/i;
+
     async function* askDelta() {
+      const asked = history[history.length - 1]?.content || "";
+      const mirror = ABOUT_LOOKS.test(asked) ? await character.mirror().catch(() => null) : null;
       const res = await fetch(deltaServer + "/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: recentHistory(), visitor: memoryBook.visitor }),
+        body: JSON.stringify({ messages: recentHistory(), visitor: memoryBook.visitor, ...(mirror && { mirror }) }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
