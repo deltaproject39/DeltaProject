@@ -554,6 +554,7 @@ Write today's diary entry, 80-150 words, in your own voice: what stayed with you
   db.prepare("INSERT INTO journal (kind, entry, created) VALUES ('diary', ?, ?)").run(entry, Date.now());
   await storeSelfNotes(await notesFromJournal(entry), "diary");
   await updateDaily(entry).catch((err) => console.error("Personality (daily):", err.message));
+  await reconsiderTastes(entry).catch((err) => console.error("Her tastes:", err.message));
   return true;
 }
 
@@ -1306,7 +1307,6 @@ function personalitySection() {
     ...list("Things you like", p.likes),
     ...list("Things you dislike", p.dislikes),
     ...list("Lately you're drawn to", p.interests),
-    ...list("Habits in how you talk and think", p.habits),
     "",
     "# Today",
     "",
@@ -1318,15 +1318,14 @@ const strings = (v, max, len = 60) => (Array.isArray(v) ? v : [])
   .filter((s) => typeof s === "string" && s.trim()).map((s) => s.trim().replace(/\.$/, "").slice(0, len)).slice(0, max);
 
 const DAILY_UPDATE = `You maintain the profile of an AI named Delta. You get her latest diary entry and her current profile.
-Return JSON exactly like {"today": "...", "likes": [...], "dislikes": [...], "interests": [...], "habits": [...]}.
+Return JSON exactly like {"today": "...", "habits": [...]}.
 - today: 1-2 sentences in second person ("You're ...", "You keep thinking about ...") about her mood and what's on her mind today, based on the diary.
-- likes, dislikes, interests: her full updated lists (at most 12 each, short phrases). Keep existing items unless the diary clearly contradicts them; add new ones the diary clearly shows.
-- habits: her full updated list (at most 8) of noticeable habits in how she talks or thinks. Same rule.`;
+- habits: her full updated list (at most 8) of noticeable habits in how she talks or thinks. Keep existing items unless the diary clearly contradicts them; add new ones the diary clearly shows.`;
 
 // After a diary entry: how she is today, and what she's come to like, dislike and be drawn to.
 async function updateDaily(diaryEntry) {
   const p = personality();
-  const current = { today: p.today, likes: p.likes, dislikes: p.dislikes, interests: p.interests, habits: p.habits };
+  const current = { today: p.today, habits: p.habits };
   const parsed = JSON.parse(await ask(
     [{ role: "system", content: DAILY_UPDATE },
       { role: "user", content: `Diary entry: """${diaryEntry}"""\n\nCurrent profile: ${JSON.stringify(current)}` }],
@@ -1334,11 +1333,53 @@ async function updateDaily(diaryEntry) {
     "json",
   ));
   if (typeof parsed.today === "string" && parsed.today.trim()) p.today = parsed.today.trim().slice(0, 300);
-  p.likes = strings(parsed.likes, LIST_LIMIT);
-  p.dislikes = strings(parsed.dislikes, LIST_LIMIT);
-  p.interests = strings(parsed.interests, LIST_LIMIT);
   p.habits = strings(parsed.habits, 8, 80);
   savePersonality(p);
+}
+
+// Her likes, dislikes and what she's drawn to are hers alone: after each diary entry she looks at
+// her own lists and decides, in her own words, what to add or drop.
+const TASTE_LISTS = { likes: "LIKES", dislikes: "DISLIKES", interests: "DRAWN TO" };
+async function reconsiderTastes(diaryEntry, signal) {
+  const p = personality();
+  const show = (items) => (items.length ? items.join("; ") : "(nothing yet)");
+  const answer = await writeInHerVoice(`These are your own lists of what you like, dislike and are drawn to. They're yours: only you decide what's on them.
+
+Likes: ${show(p.likes)}
+Dislikes: ${show(p.dislikes)}
+Drawn to: ${show(p.interests)}
+
+You just wrote this in your diary:
+"""${diaryEntry}"""
+
+Has anything changed? Maybe something new has grown on you, something has stopped mattering, or something you thought you liked doesn't hold up. Only change what you really feel differently about; it's fine to change nothing.
+Reply in exactly this form, one line each, items separated by "; " (write "none" if nothing):
+ADD LIKES:
+DROP LIKES:
+ADD DISLIKES:
+DROP DISLIKES:
+ADD DRAWN TO:
+DROP DRAWN TO:
+WHY: <one or two sentences, in your own voice>`, undefined, signal);
+
+  const line = (label) => answer.match(new RegExp(`^\\W*${label}\\W*:[ \\t]*(.*)$`, "im"))?.[1] || "";
+  const items = (label) => line(label).split(/;|,(?![^(]*\))/).map((s) => s.replace(/^[\s*"'\-]+|[\s*"'.]+$/g, "").trim())
+    .filter((s) => s && !/^(none|nothing|n\/a|-)$/i.test(s)).map((s) => s.slice(0, 60));
+  const changes = [];
+  for (const [key, label] of Object.entries(TASTE_LISTS)) {
+    const has = (x) => p[key].some((y) => y.toLowerCase() === x.toLowerCase());
+    const dropped = items(`DROP ${label}`).flatMap((d) => p[key].filter((y) => y.toLowerCase().includes(d.toLowerCase()) || d.toLowerCase().includes(y.toLowerCase())));
+    const added = items(`ADD ${label}`).filter((a) => !has(a) || dropped.some((d) => d.toLowerCase() === a.toLowerCase()));
+    if (!added.length && !dropped.length) continue;
+    p[key] = [...p[key].filter((y) => !dropped.includes(y)), ...added].slice(-LIST_LIMIT); // the oldest go first
+    changes.push({ list: key, added, dropped: [...new Set(dropped)] });
+  }
+  if (!changes.length) return null;
+  const why = line("WHY").trim().slice(0, 400);
+  savePersonality(p);
+  db.prepare("INSERT INTO personality_history (created, kind, changes, note) VALUES (?, 'tastes', ?, ?)")
+    .run(Date.now(), JSON.stringify(changes), answer); // her whole answer, so you can see exactly what she decided
+  return { changes, why };
 }
 
 // She describes changes however she likes ("+7", "down slightly", "I'd rate it 90"), so the
@@ -1439,7 +1480,7 @@ function personalityReport() {
     dislikes: p.dislikes,
     interests: p.interests,
     habits: p.habits,
-    history: db.prepare("SELECT id, created, changes, note, undone FROM personality_history ORDER BY id DESC LIMIT 30").all()
+    history: db.prepare("SELECT id, created, kind, changes, note, undone FROM personality_history ORDER BY id DESC LIMIT 30").all()
       .map((r) => ({ ...r, changes: JSON.parse(r.changes) })),
     nextReview: Number(getMeta("last_personality_review") || Date.now()) + REVIEW_EVERY_DAYS * 86400000,
   };
@@ -1521,7 +1562,7 @@ module.exports = {
   hello, claim, list, forget, forgetEverything, recall, note, learn, saveExchange, history, clearHistory,
   personaPrompt, selfSection, startGrowing, reflectIfDue, diaryIfDue, journal, selfNotes, roam, explorations,
   sleepState, fallAsleep, wakeUp, settle, close, lastTalk, interruptGrowth, roamNow,
-  personalityReport, reviewPersonality, reviewNow, undoLastChange, setPinned, behavior,
+  personalityReport, reviewPersonality, reviewNow, undoLastChange, setPinned, behavior, reconsiderTastes,
   sketchNow, sketches, sketchFile, setSketchPublic, setSketchOrigin, stopDrawing,
   mirrorNow, appearance, noteDrawRequest, mirrorImages, asksAboutLooks,
   startChatDrawing, chatDrawing, isDrawingInChat,

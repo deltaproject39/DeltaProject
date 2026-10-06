@@ -215,7 +215,7 @@
           el("span", { className: "words", textContent: t.words }));
       }));
 
-      const lists = [["Likes", data.likes], ["Dislikes", data.dislikes], ["Drawn to", data.interests], ["Habits", data.habits]];
+      const lists = [["Likes (her choice)", data.likes], ["Dislikes (her choice)", data.dislikes], ["Drawn to (her choice)", data.interests], ["Habits (observed, not told to her)", data.habits]];
       $("lists").replaceChildren(...lists.flatMap(([label, items]) => [
         el("div", { className: "label", textContent: label }),
         el("div", { className: "chips" }, ...(items.length ? items.map((i) => el("span", { className: "chip", textContent: i })) : [el("span", { className: "when", textContent: "Nothing yet" })])),
@@ -224,10 +224,15 @@
       const reviews = data.history;
       $("history").replaceChildren(...(reviews.length ? reviews.map((h) => el("div", { className: "change" + (h.undone ? " undone" : "") },
         el("div", { className: "when", textContent: when(h.created) + (h.undone ? " · undone" : "") }),
-        ...(h.changes.length
-          ? h.changes.map((c) => el("div", {}, el("strong", { textContent: `${c.trait} ${c.from} → ${c.to}` }), ` — "${c.why}"`))
-          : [el("div", { textContent: "She felt nothing about her had changed." })]),
-        el("details", {}, el("summary", { textContent: "What she wrote" }), el("p", { textContent: h.note || "" })),
+        ...(h.kind === "tastes"
+          ? [...h.changes.map((c) => el("div", {},
+              el("strong", { textContent: { likes: "Likes", dislikes: "Dislikes", interests: "Drawn to" }[c.list] + ": " }),
+              [...c.added.map((a) => "+ " + a), ...c.dropped.map((d) => "− " + d)].join(", "))),
+            el("details", {}, el("summary", { textContent: "What she wrote" }), el("p", { textContent: h.note || "" }))]
+          : h.changes.length
+            ? h.changes.map((c) => el("div", {}, el("strong", { textContent: `${c.trait} ${c.from} → ${c.to}` }), ` — "${c.why}"`))
+            : [el("div", { textContent: "She felt nothing about her had changed." })]),
+        h.kind === "tastes" ? null : el("details", {}, el("summary", { textContent: "What she wrote" }), el("p", { textContent: h.note || "" })),
       )) : [el("p", { className: "when", textContent: "No changes yet. She looks back about once a week." })]));
 
       $("self-notes").replaceChildren(...[...data.selfNotes].reverse().map((n) =>
