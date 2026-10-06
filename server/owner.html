@@ -148,6 +148,13 @@
     </section>
 
     <section>
+      <h2>Her mirror</h2>
+      <p class="when">Pictures of her avatar (in server/mirror). She looks at them and writes what she thinks; the facts below are how she describes herself.</p>
+      <ul class="notes" id="appearance"></ul>
+      <div class="row" style="margin-top:10px"><button id="mirror">Show her the mirror</button></div>
+    </section>
+
+    <section>
       <h2>What she thinks about herself</h2>
       <ul class="notes" id="self-notes"></ul>
     </section>
@@ -240,7 +247,10 @@
             el("div", {}, toggle)));
       }) : [el("p", { className: "when", textContent: "No drawings yet." })]));
 
-      const kinds = { all: "All", diary: "Diary", reflection: "Reflections", exploration: "Roaming", sketch: "Sketchbook", review: "Looking back" };
+      $("appearance").replaceChildren(...(data.appearance.length ? data.appearance.map((a) => el("li", { textContent: a }))
+        : [el("li", { className: "when", textContent: "She hasn't seen herself yet." })]));
+
+      const kinds = { all: "All", diary: "Diary", reflection: "Reflections", exploration: "Roaming", sketch: "Sketchbook", mirror: "Mirror", review: "Looking back" };
       $("tabs").replaceChildren(...Object.entries(kinds).map(([k, label]) => {
         const b = el("button", { className: k === tab ? "on" : "", textContent: label });
         b.addEventListener("click", () => { tab = k; render(); });
@@ -303,6 +313,12 @@
       const { sketch } = await api("/owner/api/sketch", { idea: $("sketch-idea").value.trim() || undefined });
       $("sketch-idea").value = "";
       return `She drew "${sketch.title}".${sketch.public ? "" : " (Kept off the website: it didn't pass the check.)"}`;
+    }));
+
+    $("mirror").addEventListener("click", (e) => action(e.target, "She's looking at herself... (a minute or so)", async () => {
+      await api("/owner/api/mirror", {});
+      tab = "mirror";
+      return "She looked. Her impressions are in her journal below.";
     }));
 
     load();

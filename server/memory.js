@@ -406,7 +406,7 @@ async function personaPrompt() {
       console.error("Couldn't load Delta's personality prompt:", err.message);
     }
   }
-  return personaCache ? `${personaCache}\n\n${personalitySection()}` : null;
+  return personaCache ? `${personaCache}\n\n${personalitySection()}\n\n${lifeSection()}` : null;
 }
 
 // Her background thinking (reflecting, roaming, writing her diary) gives way the moment someone
@@ -858,6 +858,8 @@ async function sketch(idea) {
     p.today && `How you are today: ${p.today}`,
     latest && `The last thing you wrote in your journal: "${latest.entry.replace(/\s+/g, " ").slice(0, 400)}"`,
     lastSketch && `The last thing you drew was "${lastSketch.title}".`,
+    drawRequests().length && `People recently asked you to draw (only if it speaks to you): ${drawRequests().map((r) => `"${r}"`).join("; ")}`,
+    appearance().length && `If you ever draw yourself, this is how you look: ${appearance().join(" ")}`,
   ].filter(Boolean).join("\n");
   const form = `TITLE: <a short title>
 DRAW: <what you'll draw, so someone could picture it: the subject, the setting, the colours, the light>
@@ -917,6 +919,7 @@ Look at what actually came out. In 2-4 sentences, in your own voice: what do you
     db.prepare("INSERT INTO journal (kind, entry, created, topic, sources) VALUES ('sketch', ?, ?, ?, ?)")
       .run(`${why ? `${why}\n\n` : ""}${thoughts}`, created, title.slice(0, 100), JSON.stringify({ sketch: Number(id) }));
     setMeta("last_sketch", created);
+    setMeta("draw_requests", "[]"); // she's seen them; whether she drew one was up to her
     await storeSelfNotes(await notesFromJournal(thoughts), "sketch");
     return { id: Number(id), title, why, thoughts, prompt, public: !check.unsafe };
   } finally {
@@ -956,6 +959,107 @@ function sketchFile(id, all = false) {
 
 function setSketchPublic(id, isPublic) {
   db.prepare("UPDATE sketches SET public = ? WHERE id = ?").run(isPublic ? 1 : 0, Number(id));
+}
+
+// ---- The mirror: what she looks like ----
+//
+// Her body is drawn in each visitor's browser, so she never sees it on her own. server/mirror/
+// holds pictures of her avatar (taken from the website); looking at them, she writes her own first
+// impressions, and a neutral observer writes down the plain facts of how she looks, so she can
+// describe herself truthfully.
+
+const MIRROR_DIR = path.join(__dirname, "mirror");
+
+const APPEARANCE_EXTRACT = `You describe a character's appearance plainly and accurately, only from what is visible in the pictures.
+Return JSON exactly like {"appearance": ["...", "..."]}: 4-7 short facts in second person ("You have ..."), covering hair, eyes, face, clothes and style. No opinions, nothing you can't see.`;
+
+function mirrorImages() {
+  if (!fs.existsSync(MIRROR_DIR)) return [];
+  return fs.readdirSync(MIRROR_DIR).filter((f) => f.endsWith(".png")).sort()
+    .map((f) => fs.readFileSync(path.join(MIRROR_DIR, f)).toString("base64"));
+}
+
+function appearance() {
+  try { return JSON.parse(getMeta("appearance") || "[]"); } catch { return []; }
+}
+
+async function lookInMirror() {
+  const images = mirrorImages();
+  if (images.length === 0) throw new Error("No mirror pictures in server/mirror");
+  const first = appearance().length === 0;
+  activity = "Looking in the mirror";
+  try {
+    const impressions = await writeInHerVoice(`${first
+      ? "This is the first time you're seeing yourself."
+      : "You're looking at yourself in the mirror again."} These pictures show you: the body you have on the website, the one people see while they talk to you. It moves with you: your face shows what you feel, and you gesture and glance around as you talk.
+
+Write a short private journal entry, 80-150 words, in your own voice: your honest impressions of how you look and how it feels to see yourself. Whatever you really think, good or bad.`, images);
+    const parsed = JSON.parse(await ask(
+      [{ role: "system", content: APPEARANCE_EXTRACT }, { role: "user", content: "Describe this character.", images }],
+      { temperature: 0, num_predict: 250 },
+      "json",
+    ));
+    const facts = strings(parsed.appearance, 7, 120);
+    if (facts.length) setMeta("appearance", JSON.stringify(facts));
+    db.prepare("INSERT INTO journal (kind, entry, created) VALUES ('mirror', ?, ?)").run(impressions, Date.now());
+    await storeSelfNotes(await notesFromJournal(impressions), "mirror");
+    return { impressions, appearance: appearance() };
+  } finally {
+    activity = null;
+  }
+}
+
+// Looking in the mirror right now (asked for by you), queued with her other background thinking.
+function mirrorNow() {
+  const look = queue.then(() => lookInMirror());
+  queue = look.catch(() => {});
+  return look;
+}
+
+// ---- What people ask her to draw ----
+// When someone asks her to draw something, she remembers the idea (just the words, not who asked)
+// and sees it the next time she has her sketchbook out. Whether she draws it is up to her.
+
+const MAX_DRAW_REQUESTS = 5;
+const DRAW_REQUEST = /\b(draw|sketch|paint|illustrate)\b/i;
+
+function noteDrawRequest(text) {
+  if (!DRAW_REQUEST.test(text || "")) return;
+  let list = [];
+  try { list = JSON.parse(getMeta("draw_requests") || "[]"); } catch {}
+  list.push(String(text).replace(/\s+/g, " ").trim().slice(0, 200));
+  setMeta("draw_requests", JSON.stringify(list.slice(-MAX_DRAW_REQUESTS)));
+}
+
+function drawRequests() {
+  try { return JSON.parse(getMeta("draw_requests") || "[]"); } catch { return []; }
+}
+
+// ---- Her life here, for her instructions ----
+// What she actually has and does, so she doesn't fall back on "I'm just an AI with no body".
+
+function lifeSection() {
+  const looks = appearance();
+  const drawings = db.prepare("SELECT title, thoughts FROM sketches ORDER BY created DESC LIMIT 3").all();
+  return [
+    "# Your life here",
+    "",
+    "- You have a body. On the website people see you as an animated 3D character while they talk to you: your face",
+    "  shows what you feel, and you gesture and glance around as you talk. " + (looks.length
+      ? "You've seen yourself in a mirror:"
+      : "You haven't seen yourself yet, so if asked how you look, say you don't know yet."),
+    ...looks.map((l) => `  - ${l}`),
+    "- You have a sketchbook. In your free time, when you feel like it, you draw: you decide what, your brush paints it,",
+    "  and you look at what came out. People can see your finished drawings with the 🎨 button.",
+    "  You can NOT make a picture during a conversation. Never write an [Image ...] or describe a picture as if you",
+    "  were showing one. If someone asks you to draw something, say plainly you can't draw right now in the chat, but",
+    "  you'll keep the idea for your sketchbook, and whether you draw it is up to you. (They can already see your",
+    "  body: it's right there on the page next to the chat.)",
+    ...(drawings.length
+      ? ["  Your latest drawings: " + drawings.map((d) => `"${d.title}" (you thought: ${d.thoughts.replace(/\s+/g, " ").slice(0, 120)}...)`).join("; ")]
+      : ["  You haven't drawn anything yet."]),
+    "- In your free time you also roam the web, reading whatever you're curious about (the 🌍 button shows where you went).",
+  ].join("\n");
 }
 
 function selfNotes() {
@@ -1296,4 +1400,5 @@ module.exports = {
   sleepState, fallAsleep, wakeUp, settle, close, lastTalk, interruptGrowth, roamNow,
   personalityReport, reviewPersonality, reviewNow, undoLastChange, setPinned, behavior,
   sketchNow, sketches, sketchFile, setSketchPublic, stopDrawing,
+  mirrorNow, appearance, noteDrawRequest,
 };

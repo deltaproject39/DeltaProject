@@ -7,6 +7,7 @@
 //        node server/delta-self.js roam "deep sea creatures"   ...or send her somewhere to start
 //        node server/delta-self.js draw       ask her to draw something (she picks what)
 //        node server/delta-self.js draw "the sea at night"   ...or suggest something
+//        node server/delta-self.js mirror     show her pictures of herself (server/mirror) and let her react
 //        node server/delta-self.js sleep      put her to sleep (no chatting or roaming) until you wake her
 //        node server/delta-self.js wake       wake her up
 //        node server/delta-self.js who        her personality: traits, likes, interests, today, recent changes
@@ -48,7 +49,7 @@ function show() {
   const entries = memory.journal(5).reverse();
   console.log(`\n=== Her journal (latest ${entries.length}) ===`);
   if (entries.length === 0) console.log("\n  (empty so far)");
-  const label = { diary: "Diary", reflection: "Reflection", exploration: "Roaming", review: "Looking back", sketch: "Sketchbook" };
+  const label = { diary: "Diary", reflection: "Reflection", exploration: "Roaming", review: "Looking back", sketch: "Sketchbook", mirror: "Mirror" };
   for (const e of entries) {
     const about = e.topic ? `: ${e.topic}` : "";
     console.log(`\n--- ${label[e.kind] || e.kind}${about}, ${when(e.created)} ---\n${e.entry}`);
@@ -128,6 +129,14 @@ What she thinks of it: ${s.thoughts}`);
       console.log(`See it: http://localhost:8787/owner/sketches/${s.id}.png
 `);
     }
+    process.exit(0);
+  } else if (command === "mirror") {
+    console.log("Delta is looking in the mirror...");
+    const res = await fetch("http://127.0.0.1:8787/owner/api/mirror", { method: "POST", body: "{}", signal: AbortSignal.timeout(10 * 60000) })
+      .catch(() => null);
+    const result = res ? await res.json() : { error: "Her server isn't running (start Delta first)." };
+    if (result.error) console.log(result.error);
+    else console.log(`\n${result.impressions}\n\nHow she looks (her notes):\n${result.appearance.map((a) => `  - ${a}`).join("\n")}\n`);
     process.exit(0);
   } else if (command === "diary") {
     console.log("Delta is writing her diary...");

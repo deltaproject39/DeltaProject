@@ -197,6 +197,7 @@ function handleOwner(req, res) {
       selfNotes: memory.selfNotes(),
       journal: memory.journal(40),
       sketches: memory.sketches({ all: true }),
+      appearance: memory.appearance(),
       sleep: memory.sleepState(),
       now: memory.explorations(1).now,
     });
@@ -219,6 +220,7 @@ function handleOwner(req, res) {
         case "/owner/api/sleep": memory.fallAsleep("manual"); return send(res, 200, { ok: true });
         case "/owner/api/wake": memory.wakeUp(); return send(res, 200, { ok: true });
         case "/owner/api/sketch": return send(res, 200, { sketch: await memory.sketchNow(msg.idea) });
+        case "/owner/api/mirror": return send(res, 200, await memory.mirrorNow());
         case "/owner/api/sketch-public": memory.setSketchPublic(msg.id, Boolean(msg.public)); return send(res, 200, { ok: true });
         default: return send(res, 404, { error: "Not found" });
       }
@@ -505,6 +507,7 @@ const server = http.createServer((req, res) => {
       res.end();
       memory.saveExchange(visitor, lastUser, reply);
       memory.learn(visitor, lastUser);
+      memory.noteDrawRequest(lastUser);
     } catch (err) {
       if (!res.headersSent) send(res, 502, { error: "Delta is offline right now." }, cors);
       else res.end();
