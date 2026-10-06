@@ -46,7 +46,25 @@ function show() {
   } else if (command === "roam") {
     const topic = process.argv.slice(3).join(" ").trim();
     console.log("Delta is off roaming the web... (a few minutes)");
-    const trip = await memory.roam(topic || undefined);
+    // If her server is running, the trip happens there (so visitors can interrupt it);
+    // otherwise she roams right here.
+    let trip;
+    try {
+      const res = await fetch("http://127.0.0.1:8787/owner/roam", {
+        method: "POST",
+        body: JSON.stringify({ topic: topic || undefined }),
+        signal: AbortSignal.timeout(15 * 60000),
+      });
+      const result = await res.json();
+      if (result.error === "interrupted") {
+        console.log("Someone came to talk to her, so she set the trip aside. Try again later.");
+        process.exit(0);
+      }
+      trip = result.trip;
+    } catch (err) {
+      if (err.name === "TimeoutError") throw err;
+      trip = await memory.roam(topic || undefined); // server isn't running
+    }
     if (!trip) console.log("She couldn't find anything to read this time.");
     else {
       console.log(`She ${trip.how}, and went:`);

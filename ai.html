@@ -1159,12 +1159,14 @@
       input.placeholder = placeholder;
     }
 
+    // "Say hi" starts this visitor's conversation: the click is what lets the browser play her
+    // voice, and she greets them. (She's awake regardless; only her service sleeping makes her sleep.)
     function showWakePrompt(label) {
       if (wakePrompt) wakePrompt.remove();
       wakePrompt = document.createElement("div");
       wakePrompt.className = "wake";
       const text = document.createElement("p");
-      text.textContent = "Delta is asleep.";
+      text.textContent = "Delta's here.";
       const button = document.createElement("button");
       button.type = "button";
       button.textContent = label;
@@ -1182,9 +1184,10 @@
         dotEl.className = "dot online";
         statusEl.textContent = "Online · curious about everything";
         setInputs(true, "Say something to Delta...");
+        character.set("idle");
         if (before === "asleep" || before === "offline") {
-          addNotice("Delta's back.");
-          if (woken) wake(true); else showWakePrompt("👋 Wake her up");
+          addNotice("Delta's awake again.");
+          if (woken) wake(true); else showWakePrompt("👋 Say hi");
         }
         return;
       }
@@ -1249,7 +1252,7 @@
       }
       misses = 0;
       setPresence(health.asleep ? "asleep" : "awake");
-      if (presence === "awake" && woken) {
+      if (presence === "awake") {
         // While she's out roaming, her status line says what she's reading.
         const roam = await roaming.fetchRoam();
         statusEl.textContent = roam?.now ? `Online · ${roam.now.charAt(0).toLowerCase() + roam.now.slice(1)}` : "Online · curious about everything";
@@ -1275,8 +1278,8 @@
       restoreConversation(known ? await memoryBook.loadConversation() : []);
       setPresence(health.asleep ? "asleep" : "awake");
       if (presence === "awake") {
-        statusEl.textContent = "Online · asleep for now";
-        showWakePrompt("👋 Wake her up");
+        showWakePrompt("👋 Say hi");
+        checkOn(); // shows right away if she's out roaming
       } else {
         addNotice("Delta is sleeping right now. She'll be up later.");
       }

@@ -290,10 +290,23 @@ const server = http.createServer((req, res) => {
     return goToSleep("start-delta.ps1");
   }
 
+  // delta-self.js asks the running server to send her roaming, so the trip happens in her own
+  // background time (and gives way to visitors) rather than in a separate process (this PC only).
+  if (req.method === "POST" && req.url === "/owner/roam" && isFromThisPC(req)) {
+    return readBody(req, res, cors, (body) => {
+      let topic;
+      try { topic = JSON.parse(body).topic || undefined; } catch {}
+      memory.roamNow(topic).then((trip) => send(res, 200, { trip }), (err) => send(res, 200, { error: err.name === "AbortError" ? "interrupted" : err.message }));
+    });
+  }
+
   // While she's asleep (or falling asleep) she doesn't chat or greet anyone.
   if (req.method === "POST" && (req.url === "/chat" || req.url === "/greet") && (closing || memory.sleepState().asleep)) {
     return send(res, 503, { error: "Delta is asleep right now.", asleep: true }, cors);
   }
+
+  // Someone needs her: she sets aside whatever she was doing in her free time.
+  if (req.method === "POST" && (req.url === "/chat" || req.url === "/greet")) memory.interruptGrowth();
 
   if (req.method === "POST" && req.url === "/greet") {
     if (rateLimited(hits, visitorId(req), RATE_LIMIT)) {

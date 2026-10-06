@@ -386,11 +386,21 @@ async function personaPrompt() {
   return personaCache;
 }
 
+// Her background thinking (reflecting, roaming, writing her diary) gives way the moment someone
+// needs her: interruptGrowth() cancels whatever she's in the middle of, and it's simply tried
+// again later. (Notes about what people tell her don't go through here, so they're never lost.)
+let growth = new AbortController();
+function interruptGrowth() {
+  growth.abort();
+  growth = new AbortController();
+}
+
 async function ask(messages, options, format) {
   const res = await fetch(`${OLLAMA}/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ model: NOTE_MODEL, stream: false, ...(format && { format }), options, messages }),
+    signal: growth.signal,
   });
   if (!res.ok) throw new Error(`Ollama returned ${res.status}`);
   return (await res.json()).message.content.trim();
@@ -536,7 +546,10 @@ function startGrowing(isIdle) {
         if (!isIdle()) return;
         if (await diaryIfDue()) console.log("Delta wrote in her diary.");
       })
-      .catch((err) => console.error("Growth:", err.message));
+      .catch((err) => {
+        if (err.name === "AbortError") console.log("Delta set aside what she was doing for someone.");
+        else console.error("Growth:", err.message);
+      });
   };
   setTimeout(tick, 60000);
   setInterval(tick, 2 * 60000).unref();
@@ -798,6 +811,14 @@ function lastTalk(visitor) {
   return db.prepare("SELECT MAX(created) AS t FROM messages WHERE visitor = ?").get(visitor).t || 0;
 }
 
+// A trip right now (asked for by you), queued with her other background thinking so it can be
+// interrupted by visitors like any other free time.
+function roamNow(topic) {
+  const trip = queue.then(() => roam(topic));
+  queue = trip.catch(() => {});
+  return trip;
+}
+
 // For the website's "What Delta's been exploring": her trips, never her private reflections or diary.
 function explorations(limit = 20) {
   return {
@@ -810,5 +831,5 @@ function explorations(limit = 20) {
 module.exports = {
   hello, claim, list, forget, forgetEverything, recall, note, learn, saveExchange, history, clearHistory,
   personaPrompt, selfSection, startGrowing, reflectIfDue, diaryIfDue, journal, selfNotes, roam, explorations,
-  sleepState, fallAsleep, wakeUp, settle, close, lastTalk,
+  sleepState, fallAsleep, wakeUp, settle, close, lastTalk, interruptGrowth, roamNow,
 };
