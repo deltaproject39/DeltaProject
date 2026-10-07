@@ -303,6 +303,24 @@ async function greet(res, cors, body) {
   }
 }
 
+// The website's files for her desktop app: /app/ai.html, /app/VRM/Delta.vrm, ... Only the site
+// itself (never the server folder), only a few file types.
+const SITE = path.join(__dirname, "..");
+const APP_TYPES = { ".html": "text/html; charset=utf-8", ".vrm": "model/gltf-binary", ".json": "application/json", ".png": "image/png", ".ico": "image/x-icon" };
+function serveApp(req, res) {
+  if (req.url === "/app") { // so the page's relative links (VRM/Delta.vrm) resolve under /app/
+    res.writeHead(302, { Location: "/app/" });
+    return res.end();
+  }
+  const rel = decodeURIComponent(req.url.split("?")[0].replace(/^\/app\/?/, "")) || "ai.html";
+  const file = path.resolve(SITE, rel);
+  const type = APP_TYPES[path.extname(file).toLowerCase()];
+  const inSite = file.startsWith(SITE + path.sep) && !file.startsWith(path.join(SITE, "server") + path.sep) && !file.includes(`${path.sep}.`);
+  if (!type || !inSite || !fs.existsSync(file) || !fs.statSync(file).isFile()) return send(res, 404, { error: "Not found" });
+  res.writeHead(200, { "Content-Type": type, "Cache-Control": "no-cache" });
+  fs.createReadStream(file).pipe(res);
+}
+
 // One of her drawings (a PNG), or 404.
 function sendSketch(res, file, cors) {
   if (!file) return send(res, 404, { error: "Not found" }, cors);
@@ -387,6 +405,11 @@ const server = http.createServer((req, res) => {
   // How her personality shows in her body on the site (energy, warmth, ...: 0..1 each).
   if (req.method === "GET" && req.url === "/character") {
     return send(res, 200, memory.behavior(), cors);
+  }
+
+  // Her desktop app (Delta.exe) shows the website's chat page, served from here (this PC only).
+  if (req.method === "GET" && (req.url === "/app" || req.url.startsWith("/app/")) && isFromThisPC(req)) {
+    return serveApp(req, res);
   }
 
   // Your private page about her (this PC only).

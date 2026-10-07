@@ -1240,6 +1240,11 @@
     ];
 
     async function fetchConfig() {
+      // In her desktop app the page comes straight from her own server on this PC: talk to it directly.
+      if (/^(localhost|127\.0\.0\.1)$/.test(location.hostname) && location.port === "8787") {
+        document.querySelector(".back")?.remove(); // nowhere to go back to in her own window
+        return { deltaServer: location.origin };
+      }
       try {
         return await (await fetch("config.json", { cache: "no-store" })).json();
       } catch {

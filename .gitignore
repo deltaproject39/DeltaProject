@@ -12,3 +12,6 @@ server/sketches/
 
 # Backups of her memory (personal data), stays on this PC
 server/backups/
+
+# Built by desktop/build.ps1
+Delta.exe
